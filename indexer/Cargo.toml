@@ -1,0 +1,70 @@
+[workspace]
+# This makes the indexer package independent
+
+[package]
+name = "solana-wallet-indexer"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time Solana balance indexer using Yellowstone GRPC"
+authors = ["Your Name <your.email@example.com>"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.32", features = ["full"] }
+futures-util = "0.3"
+
+# Database - Added bigdecimal feature for NUMERIC types
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "migrate", "bigdecimal"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# GRPC client
+tonic = "0.10"
+prost = "0.12"
+tower = "0.4"
+
+# Base58 encoding
+bs58 = "0.5"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Crypto and random
+rand = "0.8"
+
+# Configuration
+config = "0.13"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Add bigdecimal for handling NUMERIC types
+bigdecimal = "0.3"
+dotenvy = "0.15.7"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[bin]]
+name = "indexer"
+path = "src/main.rs"
+
+[[bin]]
+name = "test_client"
+path = "src/bin/test_client.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

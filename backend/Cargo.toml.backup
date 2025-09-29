@@ -1,0 +1,23 @@
+[package]
+name = "backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4.4"
+actix-cors = "0.7"
+jsonwebtoken = "9.2"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.35", features = ["full"] }
+env_logger = "0.10"
+dotenv = "0.15"
+store = { path = "../store" }
+reqwest = { version = "0.11", features = ["json"] }
+uuid = { version = "1.0", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-actix-web = "0.7"
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"] }
