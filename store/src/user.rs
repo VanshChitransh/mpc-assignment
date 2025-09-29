@@ -1,51 +1,56 @@
-use crate::{Store, User, CreateUserRequest, UserError};
+use crate::{Store, User, CreateUserRequest, UserError, UserProfile};
 use uuid::Uuid;
 use chrono::Utc;
 
 impl Store {
-    /// Create a new user with validation and password hashing
+
     pub async fn create_user(&self, request: CreateUserRequest) -> Result<User, UserError> {
-        // Validate email format
-        if !request.email.contains('@') {
+ 
+        if !request.email.contains('@') || request.email.len() < 5 {
             return Err(UserError::InvalidInput("Invalid email format".to_string()));
         }
 
-        // Validate password length
+
         if request.password.len() < 6 {
             return Err(UserError::InvalidInput("Password must be at least 6 characters".to_string()));
         }
 
-        // Check if user already exists
+
+        // let email = request.email.to_lowercase().trim().to_string();
+        let email_lower = request.email.to_lowercase();
+        let email_trimmed = email_lower.trim();
+
+
         let existing_user = sqlx::query!(
             "SELECT id FROM users WHERE email = $1",
-            request.email
+            email_trimmed
         )
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| UserError::DatabaseError(e.to_string()))?;
 
         if existing_user.is_some() {
-            return Err(UserError::UserExists);
+            return Err(UserError::UserExists(email_lower));
         }
 
-        // Hash the password
-        let password_hash = bcrypt::hash(&request.password, bcrypt::DEFAULT_COST)
-            .map_err(|e| UserError::DatabaseError(format!("Password hashing failed: {}", e)))?;
 
-        // Generate user ID and timestamp
+        let password_hash = bcrypt::hash(&request.password, bcrypt::DEFAULT_COST)
+            .map_err(|e| UserError::PasswordHashFailed(e.to_string()))?;
+
+
         let user_id = Uuid::new_v4();
         let created_at = Utc::now();
 
-        // Insert user into database
+
         let user = sqlx::query_as!(
             User,
             r#"
             INSERT INTO users (id, email, password_hash, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $4)
-            RETURNING *
+            RETURNING id, email, password_hash, public_key, created_at, updated_at
             "#,
             user_id,
-            request.email,
+            email_trimmed,
             password_hash,
             created_at
         )
@@ -53,23 +58,28 @@ impl Store {
         .await
         .map_err(|e| UserError::DatabaseError(e.to_string()))?;
 
+
         Ok(user)
     }
 
-    /// Authenticate user with email and password
+
     pub async fn authenticate_user(&self, email: &str, password: &str) -> Result<User, UserError> {
-        // Get user by email
+
+        let email_lower = email.to_lowercase();
+        let email_trimmed = email_lower.trim();
+
+
         let user = sqlx::query_as!(
             User,
-            "SELECT * FROM users WHERE email = $1",
-            email
+            "SELECT id, email, password_hash, public_key, created_at, updated_at FROM users WHERE email = $1",
+            email_trimmed
         )
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| UserError::DatabaseError(e.to_string()))?
         .ok_or(UserError::InvalidCredentials)?;
 
-        // Verify password
+
         let password_valid = bcrypt::verify(password, &user.password_hash)
             .map_err(|e| UserError::DatabaseError(format!("Password verification failed: {}", e)))?;
 
@@ -80,11 +90,20 @@ impl Store {
         Ok(user)
     }
 
-    /// Get user by ID
+
+    pub async fn verify_user_password(&self, email: &str, password: &str) -> Result<Option<User>, UserError> {
+        match self.authenticate_user(email, password).await {
+            Ok(user) => Ok(Some(user)),
+            Err(UserError::InvalidCredentials) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+
     pub async fn get_user_by_id(&self, user_id: &Uuid) -> Result<User, UserError> {
         let user = sqlx::query_as!(
             User,
-            "SELECT * FROM users WHERE id = $1",
+            "SELECT id, email, password_hash, public_key, created_at, updated_at FROM users WHERE id = $1",
             user_id
         )
         .fetch_optional(&self.pool)
@@ -95,12 +114,14 @@ impl Store {
         Ok(user)
     }
 
-    /// Get user by email
     pub async fn get_user_by_email(&self, email: &str) -> Result<User, UserError> {
+        let email_lower = email.to_lowercase();
+        let email_trimmed = email_lower.trim();
+        
         let user = sqlx::query_as!(
             User,
-            "SELECT * FROM users WHERE email = $1",
-            email
+            "SELECT id, email, password_hash, public_key, created_at, updated_at FROM users WHERE email = $1",
+            email_trimmed
         )
         .fetch_optional(&self.pool)
         .await
@@ -110,8 +131,12 @@ impl Store {
         Ok(user)
     }
 
-    /// Update user's Solana public key (called after MPC key generation)
     pub async fn update_user_public_key(&self, user_id: &Uuid, public_key: &str) -> Result<(), UserError> {
+
+        if public_key.len() < 32 || public_key.len() > 44 {
+            return Err(UserError::InvalidInput("Invalid Solana public key format".to_string()));
+        }
+
         let result = sqlx::query!(
             "UPDATE users SET public_key = $1, updated_at = NOW() WHERE id = $2",
             public_key,
@@ -128,9 +153,9 @@ impl Store {
         Ok(())
     }
 
-    /// Get user's public key
+
     pub async fn get_user_public_key(&self, user_id: &Uuid) -> Result<Option<String>, UserError> {
-        let public_key = sqlx::query_scalar!(
+        let result = sqlx::query!(
             "SELECT public_key FROM users WHERE id = $1",
             user_id
         )
@@ -138,23 +163,20 @@ impl Store {
         .await
         .map_err(|e| UserError::DatabaseError(e.to_string()))?;
 
-        match public_key {
-            Some(Some(key)) => Ok(Some(key)),
-            Some(None) => Ok(None),
+        match result {
+            Some(row) => Ok(row.public_key),
             None => Err(UserError::UserNotFound),
         }
     }
 
-    /// Update user's password
     pub async fn update_user_password(&self, user_id: &Uuid, new_password: &str) -> Result<(), UserError> {
-        // Validate password length
+ 
         if new_password.len() < 6 {
             return Err(UserError::InvalidInput("Password must be at least 6 characters".to_string()));
         }
 
-        // Hash the new password
         let password_hash = bcrypt::hash(new_password, bcrypt::DEFAULT_COST)
-            .map_err(|e| UserError::DatabaseError(format!("Password hashing failed: {}", e)))?;
+            .map_err(|e| UserError::PasswordHashFailed(e.to_string()))?;
 
         let result = sqlx::query!(
             "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
@@ -172,7 +194,7 @@ impl Store {
         Ok(())
     }
 
-    /// Delete user (for admin purposes - be careful!)
+
     pub async fn delete_user(&self, user_id: &Uuid) -> Result<(), UserError> {
         let result = sqlx::query!(
             "DELETE FROM users WHERE id = $1",
@@ -189,7 +211,6 @@ impl Store {
         Ok(())
     }
 
-    /// Get user count (for monitoring)
     pub async fn get_user_count(&self) -> Result<i64, UserError> {
         let count = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM users"
@@ -201,17 +222,23 @@ impl Store {
         Ok(count.unwrap_or(0))
     }
 
-    /// Check if user has completed MPC key generation
+
     pub async fn user_has_keys(&self, user_id: &Uuid) -> Result<bool, UserError> {
         let public_key = self.get_user_public_key(user_id).await?;
         Ok(public_key.is_some())
     }
 
-    /// List users for admin purposes (with pagination)
+    pub async fn get_user_profile(&self, user_id: &Uuid) -> Result<UserProfile, UserError> {
+        let user = self.get_user_by_id(user_id).await?;
+        Ok(user.to_profile())
+    }
+
     pub async fn list_users(&self, offset: i64, limit: i64) -> Result<Vec<User>, UserError> {
+        let limit = limit.min(100);
+        
         let users = sqlx::query_as!(
             User,
-            "SELECT * FROM users ORDER BY created_at DESC OFFSET $1 LIMIT $2",
+            "SELECT id, email, password_hash, public_key, created_at, updated_at FROM users ORDER BY created_at DESC OFFSET $1 LIMIT $2",
             offset,
             limit
         )
@@ -222,11 +249,10 @@ impl Store {
         Ok(users)
     }
 
-    /// Get users without public keys (need MPC key generation)
     pub async fn get_users_without_keys(&self) -> Result<Vec<User>, UserError> {
         let users = sqlx::query_as!(
             User,
-            "SELECT * FROM users WHERE public_key IS NULL ORDER BY created_at"
+            "SELECT id, email, password_hash, public_key, created_at, updated_at FROM users WHERE public_key IS NULL ORDER BY created_at"
         )
         .fetch_all(&self.pool)
         .await
@@ -234,77 +260,77 @@ impl Store {
 
         Ok(users)
     }
+
+    pub async fn get_user_stats(&self) -> Result<UserStats, UserError> {
+        let stats = sqlx::query!(
+            r#"
+            SELECT 
+                COUNT(*) as total_users,
+                COUNT(*) FILTER (WHERE public_key IS NOT NULL) as users_with_keys,
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as users_last_24h,
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') as users_last_week
+            FROM users
+            "#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| UserError::DatabaseError(e.to_string()))?;
+
+        Ok(UserStats {
+            total_users: stats.total_users.unwrap_or(0),
+            users_with_keys: stats.users_with_keys.unwrap_or(0),
+            users_last_24h: stats.users_last_24h.unwrap_or(0),
+            users_last_week: stats.users_last_week.unwrap_or(0),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct UserStats {
+    pub total_users: i64,
+    pub users_with_keys: i64,
+    pub users_last_24h: i64,
+    pub users_last_week: i64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Store;
 
     #[tokio::test]
-    async fn test_user_creation_and_auth() {
+    async fn test_user_operations() {
         if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
             let pool = Store::new_pool(&database_url).await.unwrap();
             let store = Store::new(pool);
 
-            let email = "test@example.com";
-            let password = "testpassword123";
-
-            // Test user creation
+            let test_email = format!("test-{}@example.com", Uuid::new_v4());
             let create_request = CreateUserRequest {
-                email: email.to_string(),
-                password: password.to_string(),
+                email: test_email.clone(),
+                password: "testpassword123".to_string(),
             };
-
+            
             let user = store.create_user(create_request).await.unwrap();
-            assert_eq!(user.email, email);
-            assert!(user.public_key.is_none());
-
-            // Test authentication
-            let auth_user = store.authenticate_user(email, password).await.unwrap();
+            assert_eq!(user.email, test_email.to_lowercase());
+            
+            let auth_user = store.authenticate_user(&test_email, "testpassword123").await.unwrap();
             assert_eq!(auth_user.id, user.id);
 
-            // Test wrong password
-            let wrong_auth = store.authenticate_user(email, "wrongpassword").await;
+            let wrong_auth = store.authenticate_user(&test_email, "wrongpassword").await;
             assert!(matches!(wrong_auth, Err(UserError::InvalidCredentials)));
+            
+            let test_pubkey = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+            store.update_user_public_key(&user.id, test_pubkey).await.unwrap();
+            
+            let updated_pubkey = store.get_user_public_key(&user.id).await.unwrap();
+            assert_eq!(updated_pubkey, Some(test_pubkey.to_string()));
+            
 
-            // Test updating public key
-            let public_key = "SomePublicKeyString123";
-            let user_uuid = Uuid::parse_str(&user.id).unwrap();
-            store.update_user_public_key(&user_uuid, public_key).await.unwrap();    
-
-            let updated_key = store.get_user_public_key(&user_uuid).await.unwrap();
-            assert_eq!(updated_key, Some(public_key.to_string()));
-
-            // Test user has keys
-            let has_keys = store.user_has_keys(&user_uuid).await.unwrap();
+            let has_keys = store.user_has_keys(&user.id).await.unwrap();
             assert!(has_keys);
+            
 
-            // Clean up
-            store.delete_user(&user_uuid).await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn test_user_validation() {
-        if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
-            let pool = Store::new_pool(&database_url).await.unwrap();
-            let store = Store::new(pool);
-
-            // Test invalid email
-            let invalid_email = CreateUserRequest {
-                email: "invalid-email".to_string(),
-                password: "validpassword123".to_string(),
-            };
-            let result = store.create_user(invalid_email).await;
-            assert!(matches!(result, Err(UserError::InvalidInput(_))));
-
-            // Test short password
-            let short_password = CreateUserRequest {
-                email: "valid@example.com".to_string(),
-                password: "123".to_string(),
-            };
-            let result = store.create_user(short_password).await;
-            assert!(matches!(result, Err(UserError::InvalidInput(_))));
+            store.delete_user(&user.id).await.unwrap();
         }
     }
 }

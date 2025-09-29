@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT * FROM assets ORDER BY symbol",
+  "query": "SELECT id, email, password_hash, public_key, created_at, updated_at FROM users WHERE public_key IS NULL ORDER BY created_at",
   "describe": {
     "columns": [
       {
@@ -10,36 +10,26 @@
       },
       {
         "ordinal": 1,
-        "name": "mint_address",
+        "name": "email",
         "type_info": "Varchar"
       },
       {
         "ordinal": 2,
-        "name": "decimals",
-        "type_info": "Int4"
+        "name": "password_hash",
+        "type_info": "Varchar"
       },
       {
         "ordinal": 3,
-        "name": "name",
+        "name": "public_key",
         "type_info": "Varchar"
       },
       {
         "ordinal": 4,
-        "name": "symbol",
-        "type_info": "Varchar"
-      },
-      {
-        "ordinal": 5,
-        "name": "logo_url",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 5,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -51,12 +41,10 @@
       false,
       false,
       false,
-      false,
-      false,
       true,
       false,
       false
     ]
   },
-  "hash": "77718b05320648be48390cebda55c3df7513f0eb9c27925ac4939f63c6e3957f"
+  "hash": "4085d60f23885a56fdb8c54cd8ec09548f193a135b2410ff57b1c272b9d30eeb"
 }

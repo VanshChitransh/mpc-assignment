@@ -57,7 +57,6 @@ impl From<reqwest::Error> for MpcError {
 }
 
 // Custom result type for convenience
-pub type MpcResult<T> = Result<T, MpcError>;
 
 impl MpcError {
     /// Check if the error is recoverable (worth retrying)

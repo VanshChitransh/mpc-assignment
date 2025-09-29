@@ -1,8 +1,7 @@
 use crate::error::MpcError;
 use crate::serialization::{KeyShare, SigningState};
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer};
-use rand::{rngs::OsRng, RngCore};
-use serde::{Deserialize, Serialize};
+use rand::rngs::OsRng;
 use sled::Db;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,6 +40,7 @@ impl ThresholdSigningService {
     }
 
     /// Generate a key share for the given user (simplified - not true threshold)
+    /// In production, this would use proper FROST distributed key generation
     pub async fn generate_key_share(
         &self,
         user_id: &Uuid,
@@ -60,7 +60,7 @@ impl ThresholdSigningService {
 
         // Generate a simple Ed25519 keypair (simplified approach)
         // In a real threshold scheme, this would be distributed key generation
-        let mut csprng = OsRng{};
+        let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
         let public_key_bytes = verifying_key.as_bytes();
@@ -109,23 +109,26 @@ impl ThresholdSigningService {
         Ok(Some(key_share.public_key))
     }
 
-    /// Step 1 of threshold signing - prepare for signing (simplified)
-    pub async fn sign_step1(&self, user_id: &Uuid, message: &[u8]) -> Result<(), MpcError> {
-        let session_id = format!("{}:{}", user_id, hex::encode(&message[..8]));
+    /// Prepare for signing (step 1)
+    pub async fn prepare_signing(&self, user_id: &Uuid, message_hash: &str) -> Result<(), MpcError> {
+        let session_id = format!("{}:{}", user_id, message_hash);
         
-        info!("Starting signing step 1 for session: {}", session_id);
+        info!("Preparing signing session: {}", session_id);
 
-        // Load key share for this user
-        let key_share = self.load_key_share(user_id).await?
-            .ok_or_else(|| MpcError::KeyNotFound(format!("No key found for user: {}", user_id)))?;
+        // Check if key exists
+        let user_key = format!("user:{}", user_id);
+        if !self.db.contains_key(&user_key)? {
+            return Err(MpcError::KeyNotFound(format!("No key found for user: {}", user_id)));
+        }
 
-        // Store signing state (simplified - no actual commitments)
+        // Create signing state
         let signing_state = SigningState {
             session_id: session_id.clone(),
             user_id: *user_id,
-            message: message.to_vec(),
-            nonces: vec![], // Simplified - no actual nonces
-            commitments: vec![], // Simplified - no actual commitments
+            message: hex::decode(message_hash)
+                .map_err(|_| MpcError::SerializationError("Invalid message hash hex".to_string()))?,
+            nonces: vec![], // Simplified - would contain FROST nonces
+            commitments: vec![], // Simplified - would contain FROST commitments
             signature_share: None,
             created_at: chrono::Utc::now(),
         };
@@ -133,64 +136,42 @@ impl ThresholdSigningService {
         let mut sessions = self.signing_sessions.write().await;
         sessions.insert(session_id.clone(), signing_state);
 
-        info!("Signing step 1 completed for session: {}", session_id);
+        info!("Signing session prepared: {}", session_id);
         Ok(())
     }
 
-    /// Step 2 of threshold signing - generate signature (simplified)
-    pub async fn sign_step2(&self, user_id: &Uuid, message: &[u8]) -> Result<String, MpcError> {
-        let session_id = format!("{}:{}", user_id, hex::encode(&message[..8]));
-        
-        info!("Starting signing step 2 for session: {}", session_id);
-
-        // Retrieve signing state
-        let _signing_state = {
-            let sessions = self.signing_sessions.read().await;
-            sessions.get(&session_id).cloned()
-                .ok_or_else(|| MpcError::SigningError("Signing session not found".to_string()))?
-        };
+    /// Sign a message (step 2 - simplified)
+    pub async fn sign_message(&self, user_id: &Uuid, message_hash: &str) -> Result<String, MpcError> {
+        info!("Signing message for user: {}", user_id);
 
         // Load key share
-        let key_share = self.load_key_share(user_id).await?
+        let user_key = format!("user:{}", user_id);
+        let key_data = self.db.get(&user_key)?
             .ok_or_else(|| MpcError::KeyNotFound(format!("No key found for user: {}", user_id)))?;
 
-        // Reconstruct the signing key from stored key package
-        if key_share.key_package.len() != 32 {
-            return Err(MpcError::CryptographicError("Invalid key package length".to_string()));
-        }
+        let key_share: KeyShare = rmp_serde::from_slice(&key_data)
+            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize key share: {}", e)))?;
 
-        let mut secret_bytes = [0u8; 32];
-        secret_bytes.copy_from_slice(&key_share.key_package);
-        
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        // Reconstruct signing key (simplified - real threshold would combine shares)
+        let secret_key_bytes: [u8; 32] = key_share.key_package[..32].try_into()
+            .map_err(|_| MpcError::CryptographicError("Invalid key length".to_string()))?;
+        let signing_key = SigningKey::from_bytes(&secret_key_bytes);
 
-        // Sign the message (simplified - not threshold)
-        let signature: Signature = signing_key.sign(message);
+        // Decode message hash
+        let message_bytes = hex::decode(message_hash)
+            .map_err(|_| MpcError::SerializationError("Invalid message hash hex".to_string()))?;
+
+        // Sign the message
+        let signature = signing_key.sign(&message_bytes);
         let signature_hex = hex::encode(signature.to_bytes());
 
-        // Clean up signing session
-        {
-            let mut sessions = self.signing_sessions.write().await;
-            sessions.remove(&session_id);
-        }
+        // Clean up session
+        let session_id = format!("{}:{}", user_id, message_hash);
+        let mut sessions = self.signing_sessions.write().await;
+        sessions.remove(&session_id);
 
-        info!("Signing step 2 completed for session: {}, signature: {}", session_id, signature_hex);
+        info!("Message signed successfully for user: {}", user_id);
         Ok(signature_hex)
-    }
-
-    // Private helper methods
-
-    async fn load_key_share(&self, user_id: &Uuid) -> Result<Option<KeyShare>, MpcError> {
-        let user_key = format!("user:{}", user_id);
-        
-        match self.db.get(&user_key)? {
-            Some(data) => {
-                let key_share: KeyShare = rmp_serde::from_slice(&data)
-                    .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize key share: {}", e)))?;
-                Ok(Some(key_share))
-            }
-            None => Ok(None)
-        }
     }
 
     /// List all stored user keys (for debugging)

@@ -1,0 +1,13 @@
+# Rust build output
+/target
+
+# Logs
+*.log
+
+# Temporary files
+*.swp
+*.tmp
+*.bak
+
+# OS specific
+.DS_Store

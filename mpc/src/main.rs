@@ -8,11 +8,9 @@ use dotenv::dotenv;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::Arc;
-use tracing::{info, error, warn};
+use tracing::{info, error};
 use tracing_subscriber::{fmt, EnvFilter};
 use uuid::Uuid;
-
-use crate::error::MpcError;
 use crate::tss::ThresholdSigningService;
 
 #[derive(Debug, Clone)]
@@ -62,37 +60,22 @@ pub struct SignResponse {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HealthResponse {
-    pub status: String,
-    pub node_id: u32,
-    pub timestamp: String,
-}
-
 // Health check endpoint
 async fn health(data: web::Data<AppState>) -> Result<HttpResponse> {
-    Ok(HttpResponse::Ok().json(HealthResponse {
-        status: "healthy".to_string(),
-        node_id: data.node_id,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    }))
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "status": "healthy",
+        "node_id": data.node_id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })))
 }
 
-// Key generation endpoint
+// Key generation endpoint - matches test script's /generate
 async fn generate_key(
     data: web::Data<AppState>,
     req: web::Json<KeyGenRequest>,
 ) -> Result<HttpResponse> {
     let request = req.into_inner();
     info!("Received key generation request for user: {}", request.user_id);
-
-    if request.threshold > request.total_parties {
-        return Ok(HttpResponse::BadRequest().json(KeyGenResponse {
-            success: false,
-            public_key: None,
-            error: Some("Threshold cannot be greater than total parties".to_string()),
-        }));
-    }
 
     let user_id = match Uuid::parse_str(&request.user_id) {
         Ok(id) => id,
@@ -107,12 +90,31 @@ async fn generate_key(
 
     match data.tss.generate_key_share(&user_id, request.threshold as u16, request.total_parties as u16).await {
         Ok(()) => {
-            info!("Key generation successful for user: {}", request.user_id);
-            Ok(HttpResponse::Ok().json(KeyGenResponse {
-                success: true,
-                public_key: None, // Public key will be available after aggregation
-                error: None,
-            }))
+            // Get the generated public key
+            match data.tss.get_public_key(&user_id).await {
+                Ok(Some(public_key)) => {
+                    info!("Key generation successful for user: {}", request.user_id);
+                    Ok(HttpResponse::Ok().json(KeyGenResponse {
+                        success: true,
+                        public_key: Some(public_key),
+                        error: None,
+                    }))
+                }
+                Ok(None) => {
+                    Ok(HttpResponse::InternalServerError().json(KeyGenResponse {
+                        success: false,
+                        public_key: None,
+                        error: Some("Key generation succeeded but public key not found".to_string()),
+                    }))
+                }
+                Err(e) => {
+                    Ok(HttpResponse::InternalServerError().json(KeyGenResponse {
+                        success: false,
+                        public_key: None,
+                        error: Some(e.to_string()),
+                    }))
+                }
+            }
         }
         Err(e) => {
             error!("Key generation failed for user {}: {}", request.user_id, e);
@@ -125,13 +127,13 @@ async fn generate_key(
     }
 }
 
-// Aggregate public keys endpoint
+// Aggregate keys endpoint - matches test script's /aggregate-keys
 async fn aggregate_keys(
     data: web::Data<AppState>,
     req: web::Json<AggregateKeysRequest>,
 ) -> Result<HttpResponse> {
     let request = req.into_inner();
-    info!("Received key aggregation request for user: {}", request.user_id);
+    info!("Received aggregate keys request for user: {}", request.user_id);
 
     let user_id = match Uuid::parse_str(&request.user_id) {
         Ok(id) => id,
@@ -146,7 +148,7 @@ async fn aggregate_keys(
 
     match data.tss.get_public_key(&user_id).await {
         Ok(Some(public_key)) => {
-            info!("Public key aggregation successful for user: {}", request.user_id);
+            info!("Public key retrieved for user: {}", request.user_id);
             Ok(HttpResponse::Ok().json(AggregateKeysResponse {
                 success: true,
                 public_key: Some(public_key),
@@ -154,15 +156,13 @@ async fn aggregate_keys(
             }))
         }
         Ok(None) => {
-            warn!("No key found for user: {}", request.user_id);
             Ok(HttpResponse::NotFound().json(AggregateKeysResponse {
                 success: false,
                 public_key: None,
-                error: Some("Key not found for user".to_string()),
+                error: Some("No key found for user".to_string()),
             }))
         }
         Err(e) => {
-            error!("Key aggregation failed for user {}: {}", request.user_id, e);
             Ok(HttpResponse::InternalServerError().json(AggregateKeysResponse {
                 success: false,
                 public_key: None,
@@ -172,8 +172,8 @@ async fn aggregate_keys(
     }
 }
 
-// Signing step 1 endpoint
-async fn agg_send_step1(
+// Signing phase 1 endpoint - matches test script's /agg-send-step1
+async fn sign_step1(
     data: web::Data<AppState>,
     req: web::Json<SignRequest>,
 ) -> Result<HttpResponse> {
@@ -191,23 +191,13 @@ async fn agg_send_step1(
         }
     };
 
-    let message_bytes = match hex::decode(&request.message_hash) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return Ok(HttpResponse::BadRequest().json(SignResponse {
-                success: false,
-                signature: None,
-                error: Some("Invalid message hash format".to_string()),
-            }));
-        }
-    };
-
-    match data.tss.sign_step1(&user_id, &message_bytes).await {
-        Ok(()) => {
+    // Simplified: just prepare signing session
+    match data.tss.prepare_signing(&user_id, &request.message_hash).await {
+        Ok(_) => {
             info!("Signing step 1 successful for user: {}", request.user_id);
             Ok(HttpResponse::Ok().json(SignResponse {
                 success: true,
-                signature: None, // Step 1 doesn't return signature yet
+                signature: None,
                 error: None,
             }))
         }
@@ -222,8 +212,8 @@ async fn agg_send_step1(
     }
 }
 
-// Signing step 2 endpoint
-async fn agg_send_step2(
+// Signing phase 2 endpoint - matches test script's /agg-send-step2
+async fn sign_step2(
     data: web::Data<AppState>,
     req: web::Json<SignRequest>,
 ) -> Result<HttpResponse> {
@@ -241,18 +231,8 @@ async fn agg_send_step2(
         }
     };
 
-    let message_bytes = match hex::decode(&request.message_hash) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return Ok(HttpResponse::BadRequest().json(SignResponse {
-                success: false,
-                signature: None,
-                error: Some("Invalid message hash format".to_string()),
-            }));
-        }
-    };
-
-    match data.tss.sign_step2(&user_id, &message_bytes).await {
+    // Simplified: generate signature
+    match data.tss.sign_message(&user_id, &request.message_hash).await {
         Ok(signature) => {
             info!("Signing step 2 successful for user: {}", request.user_id);
             Ok(HttpResponse::Ok().json(SignResponse {
@@ -279,7 +259,7 @@ async fn main() -> std::io::Result<()> {
 
     // Initialize tracing
     fmt()
-        .with_env_filter(EnvFilter::new("mpc=info,frost_ed25519=info"))
+        .with_env_filter(EnvFilter::new("mpc=info"))
         .init();
 
     info!("Starting MPC node...");
@@ -305,16 +285,9 @@ async fn main() -> std::io::Result<()> {
             "http://localhost:8003".to_string(),
         ]);
 
-    // Remove self from peer list
-    let self_url = format!("http://{}", bind_address);
-    let peer_nodes: Vec<String> = peer_nodes.into_iter()
-        .filter(|url| *url != self_url)
-        .collect();
-
     info!("Node ID: {}", node_id);
     info!("Bind address: {}", bind_address);
     info!("Data directory: {}", data_dir);
-    info!("Peer nodes: {:?}", peer_nodes);
 
     // Create data directory
     std::fs::create_dir_all(&data_dir)
@@ -338,7 +311,7 @@ async fn main() -> std::io::Result<()> {
 
     info!("MPC node {} starting on {}", node_id, bind_address);
 
-    // Start HTTP server
+    // Start HTTP server with test script compatible endpoints
     HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
@@ -350,11 +323,18 @@ async fn main() -> std::io::Result<()> {
             .app_data(app_state.clone())
             .wrap(cors)
             .wrap(Logger::default())
+            // Health endpoint
             .route("/health", web::get().to(health))
+            // Test script compatible endpoints
             .route("/generate", web::post().to(generate_key))
             .route("/aggregate-keys", web::post().to(aggregate_keys))
-            .route("/agg-send-step1", web::post().to(agg_send_step1))
-            .route("/agg-send-step2", web::post().to(agg_send_step2))
+            .route("/agg-send-step1", web::post().to(sign_step1))
+            .route("/agg-send-step2", web::post().to(sign_step2))
+            // Also support API prefix versions
+            .route("/api/keygen", web::post().to(generate_key))
+            .route("/api/aggregate", web::post().to(aggregate_keys))
+            .route("/api/sign-phase1", web::post().to(sign_step1))
+            .route("/api/sign-phase2", web::post().to(sign_step2))
     })
     .bind(bind_address)?
     .run()

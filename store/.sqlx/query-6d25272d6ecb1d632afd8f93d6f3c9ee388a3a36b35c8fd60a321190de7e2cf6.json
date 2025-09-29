@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                COUNT(*) as total_users,\n                COUNT(*) FILTER (WHERE public_key IS NOT NULL) as users_with_keys,\n                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as users_last_24h,\n                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') as users_last_week\n            FROM users\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_users",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "users_with_keys",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "users_last_24h",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "users_last_week",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "6d25272d6ecb1d632afd8f93d6f3c9ee388a3a36b35c8fd60a321190de7e2cf6"
+}

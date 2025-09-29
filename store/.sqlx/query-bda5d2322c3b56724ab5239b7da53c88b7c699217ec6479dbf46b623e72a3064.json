@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT * FROM assets ORDER BY symbol",
+  "query": "\n            INSERT INTO users (id, email, password_hash, created_at, updated_at)\n            VALUES ($1, $2, $3, $4, $4)\n            RETURNING id, email, password_hash, public_key, created_at, updated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -10,46 +10,39 @@
       },
       {
         "ordinal": 1,
-        "name": "mint_address",
+        "name": "email",
         "type_info": "Varchar"
       },
       {
         "ordinal": 2,
-        "name": "decimals",
-        "type_info": "Int4"
+        "name": "password_hash",
+        "type_info": "Varchar"
       },
       {
         "ordinal": 3,
-        "name": "name",
+        "name": "public_key",
         "type_info": "Varchar"
       },
       {
         "ordinal": 4,
-        "name": "symbol",
-        "type_info": "Varchar"
-      },
-      {
-        "ordinal": 5,
-        "name": "logo_url",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 5,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Timestamptz"
+      ]
     },
     "nullable": [
-      false,
-      false,
       false,
       false,
       false,
@@ -58,5 +51,5 @@
       false
     ]
   },
-  "hash": "77718b05320648be48390cebda55c3df7513f0eb9c27925ac4939f63c6e3957f"
+  "hash": "bda5d2322c3b56724ab5239b7da53c88b7c699217ec6479dbf46b623e72a3064"
 }

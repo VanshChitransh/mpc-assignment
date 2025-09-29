@@ -2,29 +2,28 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-// User model matching the database schema
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct User {
-    pub id: String,
+    pub id: Uuid,
     pub email: String,
-    #[serde(skip_serializing)] // Don't expose password hash in JSON
+    #[serde(skip_serializing)] 
     pub password_hash: String,
-    pub public_key: Option<String>, // Solana public key from MPC
+    pub public_key: Option<String>, 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-// User creation request
+
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
     pub email: String,
     pub password: String,
 }
 
-// Asset model for supported tokens
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Asset {
-    pub id: String,
+    pub id: Uuid,
     pub mint_address: String,
     pub decimals: i32,
     pub name: String,
@@ -34,18 +33,18 @@ pub struct Asset {
     pub updated_at: DateTime<Utc>,
 }
 
-// Balance model for user token balances
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Balance {
-    pub id: String,
-    pub amount: i64, // Stored in smallest units (lamports for SOL)
+    pub id: Uuid,
+    pub amount: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub user_id: String,
-    pub asset_id: String,
+    pub user_id: Uuid,
+    pub asset_id: Uuid,
 }
 
-// Extended balance with asset information for API responses
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceWithAsset {
     pub balance: i64,
@@ -54,7 +53,7 @@ pub struct BalanceWithAsset {
     pub decimals: i32,
 }
 
-// Quote model for Jupiter swap quotes
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Quote {
     pub id: Uuid,
@@ -63,23 +62,23 @@ pub struct Quote {
     pub output_mint: String,
     pub in_amount: i64,
     pub out_amount: i64,
-    pub quote_data: serde_json::Value, // Full Jupiter quote response as JSON
+    pub quote_data: serde_json::Value,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub used: bool,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-// Keyshare model for MPC nodes
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Keyshare {
-    pub user_id: String,
+    pub user_id: Uuid,
     pub public_key: String,
-    pub private_key: String, // Encrypted key share
+    pub private_key: String, 
     pub created_at: DateTime<Utc>,
 }
 
-// Request/Response types for API endpoints
+
 
 #[derive(Debug, Deserialize)]
 pub struct QuoteRequest {
@@ -89,6 +88,8 @@ pub struct QuoteRequest {
     pub output_mint: String,
     #[serde(rename = "inAmount")]
     pub in_amount: i64,
+    #[serde(rename = "slippageBps")]
+    pub slippage_bps: Option<i32>, 
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +97,8 @@ pub struct QuoteResponse {
     #[serde(rename = "outAmount")]
     pub out_amount: i64,
     pub id: String,
+    pub price_impact_pct: f64,
+    pub slippage_bps: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,7 +115,7 @@ pub struct SwapResponse {
 pub struct SendRequest {
     pub to: String,
     pub amount: i64,
-    pub mint: Option<String>, // None for SOL, Some(mint_address) for tokens
+    pub mint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,7 +125,8 @@ pub struct SendResponse {
 
 #[derive(Debug, Serialize)]
 pub struct SolBalanceResponse {
-    pub balance: i64, // in lamports
+    pub balance: i64,
+    pub balance_sol: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,107 +134,144 @@ pub struct TokenBalancesResponse {
     pub balances: Vec<BalanceWithAsset>,
 }
 
-// User authentication and profile types
+#[derive(Debug, Serialize)]
+pub struct AllBalancesResponse {
+    pub sol_balance: i64,
+    pub sol_balance_formatted: f64,
+    pub token_balances: Vec<BalanceWithAsset>,
+    pub total_assets: usize,
+}
+
+
 #[derive(Debug, Deserialize)]
 pub struct SignUpRequest {
-    pub username: String, // API spec uses "username" but it's actually email
+    pub username: String,
     pub email: String, 
     pub password: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SignInRequest {
-    pub username: String, // API spec uses "username" but it's actually email
+    pub username: String,
     pub password: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub token: String,
+    pub user: UserProfile,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SignUpResponse {
     pub message: String,
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserProfile {
+    pub id: Uuid,
+    pub email: String,
+    pub public_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub has_mpc_keys: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UserProfileResponse {
     pub email: String,
+    pub public_key: Option<String>,
+    pub wallet_address: Option<String>,
 }
 
-// MPC communication types
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MpcKeyGenRequest {
-    pub user_id: String,
+    pub user_id: Uuid,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MpcKeyGenResponse {
-    pub user_id: String,
+    pub user_id: Uuid,
     pub public_key: String,
     pub success: bool,
+    pub node_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MpcSignRequest {
-    pub user_id: String,
+    pub user_id: Uuid,
     pub transaction_data: Vec<u8>,
     pub message: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MpcSignResponse {
-    pub user_id: String,
+    pub user_id: Uuid,
     pub signature: Vec<u8>,
     pub success: bool,
+    pub node_id: String,
 }
 
-// Error types
+
 #[derive(Debug, thiserror::Error)]
 pub enum UserError {
-    #[error("User already exists")]
-    UserExists,
+    #[error("User with email '{0}' already exists")]
+    UserExists(String),
     #[error("User not found")]
     UserNotFound,
-    #[error("Invalid credentials")]
+    #[error("Invalid credentials provided")]
     InvalidCredentials,
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     #[error("Database error: {0}")]
     DatabaseError(String),
+    #[error("MPC key generation failed: {0}")]
+    MpcKeyGenFailed(String),
+    #[error("Password hashing failed: {0}")]
+    PasswordHashFailed(String),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum BalanceError {
-    #[error("Balance not found")]
-    BalanceNotFound,
-    #[error("Insufficient balance")]
-    InsufficientBalance,
-    #[error("Asset not found")]
-    AssetNotFound,
+    #[error("Balance not found for user {user_id} and asset {asset_id}")]
+    BalanceNotFound { user_id: Uuid, asset_id: Uuid },
+    #[error("Insufficient balance: required {required}, available {available}")]
+    InsufficientBalance { required: i64, available: i64 },
+    #[error("Asset not found with ID: {0}")]
+    AssetNotFound(Uuid),
+    #[error("Asset not found with mint address: {0}")]
+    AssetNotFoundByMint(String),
+    #[error("Asset not found with symbol: {0}")]
+    AssetNotFoundBySymbol(String),
     #[error("Database error: {0}")]
     DatabaseError(String),
+    #[error("Invalid amount: {0}")]
+    InvalidAmount(String),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum QuoteError {
-    #[error("Quote not found")]
-    QuoteNotFound,
-    #[error("Quote expired")]
-    QuoteExpired,
+    #[error("Quote not found with ID: {0}")]
+    QuoteNotFound(Uuid),
+    #[error("Quote expired at {expired_at}")]
+    QuoteExpired { expired_at: DateTime<Utc> },
     #[error("Quote already used")]
     QuoteAlreadyUsed,
+    #[error("Quote belongs to different user")]
+    QuoteUnauthorized,
     #[error("Database error: {0}")]
     DatabaseError(String),
+    #[error("Invalid quote data: {0}")]
+    InvalidQuoteData(String),
 }
 
-// Helper functions for creating new instances
+
 impl User {
     pub fn new(email: String, password_hash: String) -> Self {
         let now = Utc::now();
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: Uuid::new_v4(),
             email,
             password_hash,
             public_key: None,
@@ -238,13 +279,23 @@ impl User {
             updated_at: now,
         }
     }
+
+    pub fn to_profile(&self) -> UserProfile {
+        UserProfile {
+            id: self.id,
+            email: self.email.clone(),
+            public_key: self.public_key.clone(),
+            created_at: self.created_at,
+            has_mpc_keys: self.public_key.is_some(),
+        }
+    }
 }
 
 impl Balance {
-    pub fn new(user_id: String, asset_id: String, amount: i64) -> Self {
+    pub fn new(user_id: Uuid, asset_id: Uuid, amount: i64) -> Self {
         let now = Utc::now();
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: Uuid::new_v4(),
             amount,
             created_at: now,
             updated_at: now,
@@ -284,3 +335,67 @@ impl Quote {
         Utc::now() > self.expires_at
     }
 }
+
+impl Asset {
+    pub fn new(mint_address: String, decimals: i32, name: String, symbol: String, logo_url: Option<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            mint_address,
+            decimals,
+            name,
+            symbol,
+            logo_url,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+impl BalanceWithAsset {
+
+    pub fn to_human_readable(&self) -> f64 {
+        self.balance as f64 / 10_f64.powi(self.decimals)
+    }
+
+
+    pub fn formatted_balance(&self) -> String {
+        let human = self.to_human_readable();
+        if self.decimals <= 2 {
+            format!("{:.2}", human)
+        } else if self.decimals <= 6 {
+            format!("{:.6}", human)
+        } else {
+            format!("{:.9}", human)
+        }
+    }
+}
+
+
+#[macro_export]
+macro_rules! db_error {
+    ($expr:expr) => {
+        $expr.map_err(|e| BalanceError::DatabaseError(e.to_string()))
+    };
+}
+
+#[macro_export]
+macro_rules! user_db_error {
+    ($expr:expr) => {
+        $expr.map_err(|e| UserError::DatabaseError(e.to_string()))
+    };
+}
+
+#[macro_export]
+macro_rules! quote_db_error {
+    ($expr:expr) => {
+        $expr.map_err(|e| QuoteError::DatabaseError(e.to_string()))
+    };
+}
+
+pub const LAMPORTS_PER_SOL: i64 = 1_000_000_000;
+pub const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+pub const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+pub const USDT_MINT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+
+pub const DEFAULT_QUOTE_EXPIRATION_SECONDS: i64 = 300;

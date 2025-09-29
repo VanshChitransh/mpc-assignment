@@ -2,7 +2,7 @@ use crate::{Store, Asset, BalanceWithAsset, BalanceError};
 use uuid::Uuid;
 
 impl Store {
-    /// Get user's SOL balance
+
     pub async fn get_sol_balance(&self, user_id: &Uuid) -> Result<i64, BalanceError> {
         let balance = sqlx::query_scalar!(
             r#"
@@ -20,7 +20,7 @@ impl Store {
         Ok(balance.unwrap_or(0))
     }
 
-    /// Get all token balances for a user (excluding SOL)
+
     pub async fn get_token_balances(&self, user_id: &Uuid) -> Result<Vec<BalanceWithAsset>, BalanceError> {
         let balances = sqlx::query!(
             r#"
@@ -54,7 +54,6 @@ impl Store {
         Ok(result)
     }
 
-    /// Get balance for a specific asset
     pub async fn get_balance_for_asset(&self, user_id: &Uuid, asset_id: &Uuid) -> Result<i64, BalanceError> {
         let balance = sqlx::query_scalar!(
             "SELECT COALESCE(amount, 0)::bigint FROM balances WHERE user_id = $1 AND asset_id = $2",
@@ -65,12 +64,11 @@ impl Store {
         .await
         .map_err(|e| BalanceError::DatabaseError(e.to_string()))?;
 
-       Ok(balance.unwrap_or(Some(0)).unwrap_or(0))
+        Ok(balance.unwrap_or(Some(0)).unwrap_or(0))
     }
 
-    /// Update balance for a user and asset (used by indexer)
     pub async fn update_balance(&self, user_id: &Uuid, asset_id: &Uuid, new_amount: i64) -> Result<(), BalanceError> {
-        // First verify the asset exists
+
         let asset_exists = sqlx::query_scalar!(
             "SELECT EXISTS(SELECT 1 FROM assets WHERE id = $1)",
             asset_id
@@ -80,10 +78,9 @@ impl Store {
         .map_err(|e| BalanceError::DatabaseError(e.to_string()))?;
 
         if !asset_exists.unwrap_or(false) {
-            return Err(BalanceError::AssetNotFound);
+            return Err(BalanceError::AssetNotFound(*asset_id));
         }
 
-        // Upsert the balance
         sqlx::query!(
             r#"
             INSERT INTO balances (id, user_id, asset_id, amount, created_at, updated_at)
@@ -103,32 +100,30 @@ impl Store {
         Ok(())
     }
 
-    /// Add to existing balance (positive amount adds, negative subtracts)
     pub async fn adjust_balance(&self, user_id: &Uuid, asset_id: &Uuid, amount_delta: i64) -> Result<i64, BalanceError> {
-        // Get current balance
+
         let current_balance = self.get_balance_for_asset(user_id, asset_id).await?;
         let new_balance = current_balance + amount_delta;
 
-        // Prevent negative balances
         if new_balance < 0 {
-            return Err(BalanceError::InsufficientBalance);
+            return Err(BalanceError::InsufficientBalance {
+                required: amount_delta.abs(),
+                available: current_balance,
+            });
         }
 
-        // Update the balance
         self.update_balance(user_id, asset_id, new_balance).await?;
         
         Ok(new_balance)
     }
 
-    /// Initialize zero balances for a new user (for supported assets)
     pub async fn initialize_user_balances(&self, user_id: &Uuid) -> Result<(), BalanceError> {
-        // Get all supported assets
+
         let assets = sqlx::query!("SELECT id FROM assets")
             .fetch_all(&self.pool)
             .await
             .map_err(|e| BalanceError::DatabaseError(e.to_string()))?;
 
-        // Insert zero balance for each asset
         for asset in assets {
             sqlx::query!(
                 r#"
@@ -148,7 +143,22 @@ impl Store {
         Ok(())
     }
 
-    /// Get asset by mint address
+    pub async fn get_or_create_asset(&self, mint_address: &str, decimals: i32, name: Option<String>, symbol: Option<String>) -> Result<Asset, BalanceError> {
+        if let Ok(asset) = self.get_asset_by_mint(mint_address).await {
+            return Ok(asset);
+        }
+        let name = name.unwrap_or_else(|| format!("Unknown Token ({})", &mint_address[0..6]));
+        let symbol = symbol.unwrap_or_else(|| mint_address[0..6].to_string());
+        
+        self.add_asset(
+            mint_address.to_string(),
+            decimals,
+            name,
+            symbol,
+            None,
+        ).await
+    }
+
     pub async fn get_asset_by_mint(&self, mint_address: &str) -> Result<Asset, BalanceError> {
         let asset = sqlx::query_as!(
             Asset,
@@ -159,10 +169,9 @@ impl Store {
         .await
         .map_err(|e| BalanceError::DatabaseError(e.to_string()))?;
 
-        asset.ok_or(BalanceError::AssetNotFound)
+        asset.ok_or(BalanceError::AssetNotFoundByMint(mint_address.to_string()))
     }
 
-    /// Get asset by symbol
     pub async fn get_asset_by_symbol(&self, symbol: &str) -> Result<Asset, BalanceError> {
         let asset = sqlx::query_as!(
             Asset,
@@ -173,10 +182,9 @@ impl Store {
         .await
         .map_err(|e| BalanceError::DatabaseError(e.to_string()))?;
 
-        asset.ok_or(BalanceError::AssetNotFound)
+        asset.ok_or(BalanceError::AssetNotFoundBySymbol(symbol.to_string()))
     }
 
-    /// Get all supported assets
     pub async fn get_all_assets(&self) -> Result<Vec<Asset>, BalanceError> {
         let assets = sqlx::query_as!(
             Asset,
@@ -189,7 +197,6 @@ impl Store {
         Ok(assets)
     }
 
-    /// Add a new supported asset
     pub async fn add_asset(&self, mint_address: String, decimals: i32, name: String, symbol: String, logo_url: Option<String>) -> Result<Asset, BalanceError> {
         let asset_id = Uuid::new_v4();
         
@@ -198,6 +205,12 @@ impl Store {
             r#"
             INSERT INTO assets (id, mint_address, decimals, name, symbol, logo_url, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+            ON CONFLICT (mint_address) DO UPDATE 
+            SET decimals = EXCLUDED.decimals,
+                name = EXCLUDED.name,
+                symbol = EXCLUDED.symbol,
+                logo_url = COALESCE(EXCLUDED.logo_url, assets.logo_url),
+                updated_at = NOW()
             RETURNING *
             "#,
             asset_id,
@@ -214,13 +227,11 @@ impl Store {
         Ok(asset)
     }
 
-    /// Check if user has sufficient balance for a transaction
     pub async fn check_sufficient_balance(&self, user_id: &Uuid, asset_id: &Uuid, required_amount: i64) -> Result<bool, BalanceError> {
         let current_balance = self.get_balance_for_asset(user_id, asset_id).await?;
         Ok(current_balance >= required_amount)
     }
 
-    /// Bulk update balances (used by indexer for efficient updates)
     pub async fn bulk_update_balances(&self, updates: Vec<(Uuid, Uuid, i64)>) -> Result<(), BalanceError> {
         let mut transaction = self.pool.begin().await
             .map_err(|e| BalanceError::DatabaseError(e.to_string()))?;
@@ -248,6 +259,15 @@ impl Store {
 
         Ok(())
     }
+   pub async fn update_balance_by_mint(&self, user_id: &Uuid, mint_address: &str, new_amount: i64) -> Result<(), BalanceError> {
+        let asset = self.get_asset_by_mint(mint_address).await?;
+        self.update_balance(user_id, &asset.id, new_amount).await
+    }
+
+    pub async fn get_balance_by_mint(&self, user_id: &Uuid, mint_address: &str) -> Result<i64, BalanceError> {
+        let asset = self.get_asset_by_mint(mint_address).await?;
+        self.get_balance_for_asset(user_id, &asset.id).await
+    }
 }
 
 #[cfg(test)]
@@ -260,11 +280,26 @@ mod tests {
         if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
             let pool = Store::new_pool(&database_url).await.unwrap();
             let store = Store::new(pool);
-            
-            // Test getting SOL balance for non-existent user
+
+            store.initialize_default_assets().await.unwrap();
+
             let user_id = Uuid::new_v4();
             let balance = store.get_sol_balance(&user_id).await.unwrap();
             assert_eq!(balance, 0);
+
+            store.initialize_user_balances(&user_id).await.unwrap();
+
+            let sol_asset = store.get_asset_by_symbol("SOL").await.unwrap();
+            store.update_balance(&user_id, &sol_asset.id, 1_000_000_000).await.unwrap();
+            
+            let updated_balance = store.get_sol_balance(&user_id).await.unwrap();
+            assert_eq!(updated_balance, 1_000_000_000);
+ 
+            let new_balance = store.adjust_balance(&user_id, &sol_asset.id, -500_000_000).await.unwrap();
+            assert_eq!(new_balance, 500_000_000);
+
+            let result = store.adjust_balance(&user_id, &sol_asset.id, -600_000_000).await;
+            assert!(result.is_err());
         }
     }
 }

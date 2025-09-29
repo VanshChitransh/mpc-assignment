@@ -4,11 +4,51 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "migrate", "json"] }
+# Database - with offline feature for compile-time verification
+sqlx = { version = "0.7", features = [
+    "runtime-tokio-rustls", 
+    "postgres", 
+    "chrono", 
+    "uuid", 
+    "migrate", 
+    "json",
+    "bigdecimal",
+    "macros",
+    # "offline"  # Add this feature for offline mode
+] }
+
+# Cryptography and password hashing
 bcrypt = "0.15"
+
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# UUID support
 uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Time handling
 chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
 thiserror = "1.0"
+anyhow = "1.0"
+
+# Async runtime
 tokio = { version = "1.35", features = ["full"] }
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+
+[[bin]]
+name = "store_test"
+path = "src/bin/test.rs"
+
+[[bin]]
+name = "verify_db"
+path = "src/bin/verify_db.rs"
+
+[[bin]]
+name = "schema_validation"
+path = "src/bin/schema_validation.rs"

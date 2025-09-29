@@ -3,7 +3,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 impl Store {
-    /// Store a new quote from Jupiter API
     pub async fn store_quote(
         &self,
         user_id: &Uuid,
@@ -15,7 +14,7 @@ impl Store {
         expires_in_seconds: i64,
     ) -> Result<Quote, QuoteError> {
         let quote = Quote::new(
-            user_id.clone(),
+            *user_id,
             input_mint.to_string(),
             output_mint.to_string(),
             in_amount,
@@ -48,7 +47,34 @@ impl Store {
         Ok(quote)
     }
 
-    /// Retrieve a quote by ID
+    pub async fn create_quote(
+        &self,
+        user_id: Uuid,
+        input_mint: String,
+        output_mint: String,
+        quote_data: Value,
+        expires_in: i64,
+    ) -> Result<Quote, QuoteError> {
+        let in_amount = quote_data.get("inAmount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        
+        let out_amount = quote_data.get("outAmount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        
+        self.store_quote(
+            &user_id,
+            &input_mint,
+            &output_mint,
+            in_amount,
+            out_amount,
+            quote_data,
+            expires_in,
+        ).await
+    }
+
+
     pub async fn get_quote(&self, quote_id: &Uuid) -> Result<Quote, QuoteError> {
         let quote = sqlx::query_as!(
             Quote,
@@ -59,10 +85,10 @@ impl Store {
         .await
         .map_err(|e| QuoteError::DatabaseError(e.to_string()))?;
 
-        quote.ok_or(QuoteError::QuoteNotFound)
+        quote.ok_or(QuoteError::QuoteNotFound(*quote_id))
     }
 
-    /// Retrieve and validate a quote for use (checks expiration and usage)
+
     pub async fn get_valid_quote(&self, quote_id: &Uuid, user_id: &Uuid) -> Result<Quote, QuoteError> {
         let quote = sqlx::query_as!(
             Quote,
@@ -73,14 +99,14 @@ impl Store {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| QuoteError::DatabaseError(e.to_string()))?
-        .ok_or(QuoteError::QuoteNotFound)?;
+        .ok_or(QuoteError::QuoteNotFound(*quote_id))?;
 
-        // Check if quote is expired
         if quote.is_expired() {
-            return Err(QuoteError::QuoteExpired);
+            return Err(QuoteError::QuoteExpired {
+                expired_at: quote.expires_at,
+            });
         }
 
-        // Check if quote has already been used
         if quote.used {
             return Err(QuoteError::QuoteAlreadyUsed);
         }
@@ -88,7 +114,6 @@ impl Store {
         Ok(quote)
     }
 
-    /// Mark a quote as used
     pub async fn mark_quote_used(&self, quote_id: &Uuid) -> Result<(), QuoteError> {
         let result = sqlx::query!(
             "UPDATE quotes SET used = true, updated_at = NOW() WHERE id = $1 AND used = false",
@@ -99,13 +124,12 @@ impl Store {
         .map_err(|e| QuoteError::DatabaseError(e.to_string()))?;
 
         if result.rows_affected() == 0 {
-            return Err(QuoteError::QuoteNotFound);
+            return Err(QuoteError::QuoteNotFound(*quote_id));
         }
 
         Ok(())
     }
 
-    /// Get all quotes for a user (for debugging/admin purposes)
     pub async fn get_user_quotes(&self, user_id: &Uuid, limit: Option<i64>) -> Result<Vec<Quote>, QuoteError> {
         let limit = limit.unwrap_or(50);
 
@@ -122,7 +146,6 @@ impl Store {
         Ok(quotes)
     }
 
-    /// Clean up expired quotes (should be run periodically)
     pub async fn cleanup_expired_quotes(&self) -> Result<u64, QuoteError> {
         let result = sqlx::query!(
             "DELETE FROM quotes WHERE expires_at < NOW()"
@@ -134,7 +157,6 @@ impl Store {
         Ok(result.rows_affected())
     }
 
-    /// Clean up old used quotes (older than specified days)
     pub async fn cleanup_old_used_quotes(&self, days_old: i32) -> Result<u64, QuoteError> {
         let result = sqlx::query!(
             "DELETE FROM quotes WHERE used = true AND created_at < NOW() - INTERVAL '1 day' * $1",
@@ -147,7 +169,6 @@ impl Store {
         Ok(result.rows_affected())
     }
 
-    /// Get quote statistics for monitoring
     pub async fn get_quote_stats(&self) -> Result<QuoteStats, QuoteError> {
         let stats = sqlx::query!(
             r#"
@@ -183,7 +204,7 @@ pub struct QuoteStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Store;
+    use crate::{Store, CreateUserRequest};
     use serde_json::json;
 
     #[tokio::test]
@@ -192,38 +213,52 @@ mod tests {
             let pool = Store::new_pool(&database_url).await.unwrap();
             let store = Store::new(pool);
 
-            let user_id = Uuid::new_v4();
+            let test_email = format!("test-{}@example.com", Uuid::new_v4());
+            let create_request = CreateUserRequest {
+                email: test_email,
+                password: "testpassword123".to_string(),
+            };
+            
+            let user = store.create_user(create_request).await.unwrap();
+
             let quote_data = json!({
                 "inputMint": "So11111111111111111111111111111111111111112",
                 "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                "swapMode": "ExactIn"
+                "inAmount": 1000000000,
+                "outAmount": 100000000,
+                "swapMode": "ExactIn",
+                "routes": []
             });
 
-            // Test storing a quote
             let quote = store.store_quote(
-                &user_id,
+                &user.id,
                 "So11111111111111111111111111111111111111112",
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                 1000000000,
                 100000000,
                 quote_data,
-                300 // 5 minutes
+                300
             ).await.unwrap();
 
-            // Test retrieving the quote
             let retrieved = store.get_quote(&quote.id).await.unwrap();
             assert_eq!(retrieved.id, quote.id);
-            assert_eq!(retrieved.user_id, user_id);
+            assert_eq!(retrieved.user_id, user.id);
 
-            // Test getting valid quote
-            let valid_quote = store.get_valid_quote(&quote.id, &user_id).await.unwrap();
+            let valid_quote = store.get_valid_quote(&quote.id, &user.id).await.unwrap();
             assert!(!valid_quote.used);
             assert!(!valid_quote.is_expired());
 
-            // Test marking quote as used
             store.mark_quote_used(&quote.id).await.unwrap();
-            let used_result = store.get_valid_quote(&quote.id, &user_id).await;
+            let used_result = store.get_valid_quote(&quote.id, &user.id).await;
             assert!(matches!(used_result, Err(QuoteError::QuoteAlreadyUsed)));
+
+            let user_quotes = store.get_user_quotes(&user.id, Some(10)).await.unwrap();
+            assert!(!user_quotes.is_empty());
+
+            let stats = store.get_quote_stats().await.unwrap();
+            assert!(stats.total_quotes > 0);
+
+            store.delete_user(&user.id).await.unwrap();
         }
     }
 }
