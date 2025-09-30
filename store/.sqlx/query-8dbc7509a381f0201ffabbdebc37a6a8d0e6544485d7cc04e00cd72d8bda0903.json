@@ -10,7 +10,7 @@
         "Int4",
         "Varchar",
         "Varchar",
-        "Text"
+        "Varchar"
       ]
     },
     "nullable": []

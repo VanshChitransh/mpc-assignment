@@ -1,356 +1,312 @@
-use crate::middleware::AuthExtensions;
-use crate::AppState;
-use actix_web::{web, HttpRequest, HttpResponse, Result};
+use crate::middleware::auth::{JwtAuth, get_user_id};
+use crate::services::mpc::MpcClient;
+
+use actix_web::{get, post, web, HttpResponse, Result, HttpRequest};
+use sqlx::PgPool;
 use serde::{Deserialize, Serialize};
-use store::{Store, CreateUserRequest, UserError};
-use tracing::{error, info, warn};
 use uuid::Uuid;
+use bcrypt::{hash, verify, DEFAULT_COST};
+use chrono::Utc;
+use tracing::{info, error};
+use std::sync::Arc;
+
+/// =======================
+/// Request / Response Types
+/// =======================
 
 #[derive(Deserialize)]
 pub struct SignUpRequest {
-    pub username: String,
-    pub email: Option<String>,  // Made optional to support both formats
-    pub password: String,
-}
-
-#[derive(Serialize)]
-pub struct SignUpResponse {
-    pub success: bool,
-    pub user_id: String,
-    pub username: String,
     pub email: String,
-    pub public_key: Option<String>,
-    pub message: String,
+    pub password: String,
 }
 
 #[derive(Deserialize)]
 pub struct SignInRequest {
-    pub username: String,
+    pub email: String,
     pub password: String,
 }
 
 #[derive(Serialize)]
-pub struct SignInResponse {
-    pub success: bool,
-    pub token: String,
-    pub user: UserInfo,
-}
-
-#[derive(Serialize)]
-pub struct UserInfo {
-    pub user_id: String,
-    pub username: String,
+pub struct UserResponse {
+    pub id: String,
     pub email: String,
     pub public_key: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Serialize)]
-pub struct UserResponse {
+pub struct UserAuthResponse {
     pub success: bool,
-    pub user: UserInfo,
+    pub token: String,
+    pub user: UserResponse,
 }
 
 #[derive(Serialize)]
-pub struct ErrorResponse {
+pub struct UserErrorResponse {
     pub success: bool,
     pub error: String,
 }
 
-// Helper function to validate email format
-fn is_valid_email(email: &str) -> bool {
-    let email_regex = regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
-    email_regex.is_match(email)
-}
-
+/// =======================
+/// Signup Endpoint
+/// =======================
+#[post("/signup")]
 pub async fn sign_up(
-    data: web::Data<AppState>,
+    pool: web::Data<PgPool>,
+    jwt_auth: web::Data<JwtAuth>,
+    mpc_client: web::Data<Arc<MpcClient>>,
     req_body: web::Json<SignUpRequest>,
 ) -> Result<HttpResponse> {
     let signup_req = req_body.into_inner();
-    
-    info!("Processing signup request for username: {}", signup_req.username);
-    
-    // Validate input
-    if signup_req.username.trim().is_empty() {
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+    info!("User signup attempt: {}", signup_req.email);
+
+    // Validate email format
+    if !signup_req.email.contains('@') {
+        return Ok(HttpResponse::BadRequest().json(UserErrorResponse {
             success: false,
-            error: "Username cannot be empty".to_string(),
+            error: "Invalid email format".to_string(),
         }));
     }
-    
-    if signup_req.password.len() < 6 {
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+
+    // Validate password length
+    if signup_req.password.len() < 8 {
+        return Ok(HttpResponse::BadRequest().json(UserErrorResponse {
             success: false,
-            error: "Password must be at least 6 characters long".to_string(),
+            error: "Password must be at least 8 characters".to_string(),
         }));
     }
-    
-    // Determine the email to use
-    let email = if let Some(provided_email) = signup_req.email.as_ref() {
-        // If email is provided separately, use it
-        if provided_email.trim().is_empty() {
-            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+
+    // Check if user already exists
+    match sqlx::query!(
+        "SELECT email FROM users WHERE email = $1",
+        signup_req.email.to_lowercase()
+    )
+    .fetch_optional(pool.as_ref())
+    .await
+    {
+        Ok(Some(_)) => {
+            return Ok(HttpResponse::BadRequest().json(UserErrorResponse {
                 success: false,
-                error: "Email cannot be empty".to_string(),
+                error: "User already exists".to_string(),
             }));
         }
-        
-        if !is_valid_email(provided_email) {
-            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+        Ok(None) => {}
+        Err(e) => {
+            error!("Database error during user check: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(UserErrorResponse {
                 success: false,
-                error: "Invalid email format".to_string(),
+                error: "Database error".to_string(),
             }));
         }
-        
-        provided_email.clone()
-    } else {
-        // If no separate email provided, check if username is an email
-        if is_valid_email(&signup_req.username) {
-            signup_req.username.clone()
-        } else {
-            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+    }
+
+    // Hash password
+    let password_hash = match hash(signup_req.password, DEFAULT_COST) {
+        Ok(hash) => hash,
+        Err(e) => {
+            error!("Password hashing error: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(UserErrorResponse {
                 success: false,
-                error: "Please provide a valid email address".to_string(),
+                error: "Password processing error".to_string(),
             }));
         }
     };
-    
-    info!("Using email: {} for user: {}", email, signup_req.username);
-    
-    let store = Store::new(data.db.clone());
-    
-    // Check if user already exists by email
-    match store.get_user_by_email(&email).await {
+
+    // Create user
+    let user_id = Uuid::new_v4();
+    let now = Utc::now();
+
+    match sqlx::query!(
+        r#"
+        INSERT INTO users (id, email, password_hash, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+        user_id,
+        signup_req.email.to_lowercase(),
+        password_hash,
+        now,
+        now
+    )
+    .execute(pool.as_ref())
+    .await
+    {
         Ok(_) => {
-            warn!("Signup attempt with existing email: {}", email);
-            return Ok(HttpResponse::Conflict().json(ErrorResponse {
-                success: false,
-                error: "Email already exists".to_string(),
-            }));
-        }
-        Err(UserError::UserNotFound) => {
-            // User doesn't exist, continue with registration
-            info!("Email {} is available, proceeding with registration", email);
+            info!("Successfully created user {}: {}", user_id, signup_req.email);
         }
         Err(e) => {
-            error!("Error checking user existence for email {}: {}", email, e);
-            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+            error!("Failed to create user: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(UserErrorResponse {
                 success: false,
-                error: "Database error while checking user existence".to_string(),
+                error: "Failed to create user".to_string(),
             }));
         }
     }
-    
-    // Create user in database
-    let create_request = CreateUserRequest {
-        email: email.clone(),
-        password: signup_req.password,
-    };
-    
-    match store.create_user(create_request).await {
-        Ok(user) => {
-            info!("Successfully created user: {} with ID: {} and email: {}", 
-                  signup_req.username, user.id, email);
-            
-            // Generate MPC key for the user
-            let user_uuid = user.id; // Already a Uuid, no need to parse
-            
-            info!("Generating MPC key for user: {}", user_uuid);
-            let public_key = match data.mpc_client.generate_key(&user_uuid).await {
-                Ok(pk) => {
-                    info!("Successfully generated MPC key for user: {} - Public key: {}", user_uuid, pk);
-                    
-                    // Update user with public key
-                    match store.update_user_public_key(&user_uuid, &pk).await {
-                        Ok(()) => {
-                            info!("Successfully updated user {} with public key", user_uuid);
-                        }
-                        Err(e) => {
-                            warn!("Failed to update user public key for {}: {}", user_uuid, e);
-                            // Continue anyway since user creation succeeded
-                        }
-                    }
-                    Some(pk)
-                }
+
+    // ===== Trigger MPC key generation =====
+    let public_key = match mpc_client.generate_key(&user_id.to_string()).await {
+        Ok(pk) => {
+            info!("MPC key generated successfully for user {}: {}", user_id, pk);
+            // Save public key to DB
+            match sqlx::query!(
+                "UPDATE users SET public_key = $1, updated_at = $2 WHERE id = $3",
+                pk,
+                Utc::now(),
+                user_id
+            )
+            .execute(pool.as_ref())
+            .await
+            {
+                Ok(_) => Some(pk),
                 Err(e) => {
-                    warn!("Failed to generate MPC key for user {}: {} - User created without wallet", user_uuid, e);
-                    // Don't fail the entire signup process if wallet creation fails
+                    error!("Failed to save public key for user {}: {}", user_id, e);
                     None
                 }
-            };
-            
-            Ok(HttpResponse::Created().json(SignUpResponse {
-                success: true,
-                user_id: user.id.to_string(),
-                username: signup_req.username,
-                email: email,
-                public_key,
-                message: "User created successfully".to_string(),
-            }))
-        }
-        Err(UserError::UserExists(_)) => {
-            warn!("User already exists with email: {}", email);
-            Ok(HttpResponse::Conflict().json(ErrorResponse {
-                success: false,
-                error: "User with this email already exists".to_string(),
-            }))
-        }
-        Err(UserError::InvalidCredentials) => {
-            error!("Invalid credentials during user creation for email: {}", email);
-            Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "Invalid user data provided".to_string(),
-            }))
+            }
         }
         Err(e) => {
-            error!("Failed to create user in database for email {}: {}", email, e);
-            Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "Failed to create user account".to_string(),
-            }))
+            error!("MPC key generation failed for user {}: {}", user_id, e);
+            None
         }
-    }
+    };
+
+    // Generate JWT
+    let token = jwt_auth.generate_token(&user_id, &signup_req.email).map_err(|e| {
+        error!("JWT encoding error: {}", e);
+        actix_web::error::ErrorInternalServerError("Token generation error")
+    })?;
+
+    let user_response = UserResponse {
+        id: user_id.to_string(),
+        email: signup_req.email,
+        public_key,
+        created_at: now,
+    };
+
+    Ok(HttpResponse::Created().json(UserAuthResponse {
+        success: true,
+        token,
+        user: user_response,
+    }))
 }
 
+/// =======================
+/// Signin Endpoint
+/// =======================
+#[post("/signin")]
 pub async fn sign_in(
-    data: web::Data<AppState>,
+    pool: web::Data<PgPool>,
+    jwt_auth: web::Data<JwtAuth>,
     req_body: web::Json<SignInRequest>,
 ) -> Result<HttpResponse> {
     let signin_req = req_body.into_inner();
-    
-    info!("Processing signin request for username: {}", signin_req.username);
-    
-    // Validate input
-    if signin_req.username.trim().is_empty() || signin_req.password.trim().is_empty() {
-        warn!("Empty username or password provided");
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-            success: false,
-            error: "Username and password are required".to_string(),
-        }));
-    }
-    
-    let store = Store::new(data.db.clone());
-    
-    // Determine if username is an email or we need to treat it as email
-    let email_to_authenticate = if is_valid_email(&signin_req.username) {
-        signin_req.username.clone()
-    } else {
-        // If not a valid email, still try to authenticate as-is 
-        // (in case user was created with username as email)
-        signin_req.username.clone()
-    };
-    
-    info!("Attempting authentication for email: {}", email_to_authenticate);
-    
-    // Authenticate user
-    match store.authenticate_user(&email_to_authenticate, &signin_req.password).await {
-        Ok(user) => {
-            info!("Successful signin for user ID: {} with email: {}", user.id, user.email);
-            
-            // Parse user ID as UUID for token generation
-            let user_uuid = user.id;
-            
-            info!("Generating JWT token for user: {}", user_uuid);
-            
-            // Generate JWT token
-            let token = match data.jwt_auth.generate_token(&user_uuid, &user.email) {
-                Ok(token) => {
-                    info!("Successfully generated JWT token for user: {}", user.id);
-                    token
-                }
-                Err(e) => {
-                    error!("Failed to generate JWT token for user {}: {}", user.id, e);
-                    return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                        success: false,
-                        error: "Failed to generate authentication token".to_string(),
-                    }));
-                }
-            };
-            
-            Ok(HttpResponse::Ok().json(SignInResponse {
-                success: true,
-                token,
-                user: UserInfo {
-                    user_id: user.id.to_string(),
-                    username: signin_req.username, // Return the username they used to sign in
-                    email: user.email,
-                    public_key: user.public_key,
-                    created_at: user.created_at,
-                },
-            }))
-        }
-        Err(UserError::InvalidCredentials) => {
-            warn!("Invalid credentials for email: {}", email_to_authenticate);
-            Ok(HttpResponse::Unauthorized().json(ErrorResponse {
+    info!("User signin attempt: {}", signin_req.email);
+
+    // Get user from DB
+    let user = match sqlx::query!(
+        "SELECT id, email, password_hash, public_key, created_at FROM users WHERE email = $1",
+        signin_req.email.to_lowercase()
+    )
+    .fetch_optional(pool.as_ref())
+    .await
+    {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return Ok(HttpResponse::Unauthorized().json(UserErrorResponse {
                 success: false,
-                error: "Invalid username or password".to_string(),
-            }))
-        }
-        Err(UserError::UserNotFound) => {
-            warn!("Signin attempt with non-existent email: {}", email_to_authenticate);
-            Ok(HttpResponse::Unauthorized().json(ErrorResponse {
-                success: false,
-                error: "Invalid username or password".to_string(),
-            }))
+                error: "Invalid credentials".to_string(),
+            }));
         }
         Err(e) => {
-            error!("Error during authentication for email {}: {}", email_to_authenticate, e);
-            Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+            error!("Database error during signin: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(UserErrorResponse {
                 success: false,
-                error: "Authentication error occurred".to_string(),
-            }))
-        }
-    }
-}
-
-pub async fn get_user(
-    data: web::Data<AppState>,
-    req: HttpRequest,
-) -> Result<HttpResponse> {
-    // Extract user ID from JWT token (set by auth middleware)
-    let user_id = match req.get_user_id() {
-        Some(id) => id,
-        None => {
-            error!("No user ID found in authenticated request");
-            return Ok(HttpResponse::Unauthorized().json(ErrorResponse {
-                success: false,
-                error: "Authentication required".to_string(),
+                error: "Database error".to_string(),
             }));
         }
     };
-    
-    info!("Getting user profile for ID: {}", user_id);
-    
-    // Get user from database
-    let store = Store::new(data.db.clone());
-    match store.get_user_by_id(&user_id).await {
-        Ok(user) => {
-            info!("Successfully retrieved user profile for ID: {}", user_id);
-            Ok(HttpResponse::Ok().json(UserResponse {
-                success: true,
-                user: UserInfo {
-                    user_id: user.id.to_string(),
-                    username: user.email.clone(), // Using email as username for consistency
-                    email: user.email,
-                    public_key: user.public_key,
-                    created_at: user.created_at,
-                },
-            }))
-        }
-        Err(UserError::UserNotFound) => {
-            warn!("User not found for ID: {}", user_id);
-            Ok(HttpResponse::NotFound().json(ErrorResponse {
+
+    // Verify password
+    match verify(&signin_req.password, &user.password_hash) {
+        Ok(true) => info!("Successful signin for user {}: {}", user.id, user.email),
+        Ok(false) => {
+            return Ok(HttpResponse::Unauthorized().json(UserErrorResponse {
                 success: false,
-                error: "User not found".to_string(),
-            }))
+                error: "Invalid credentials".to_string(),
+            }));
         }
         Err(e) => {
-            error!("Failed to get user profile for ID {}: {}", user_id, e);
-            Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+            error!("Password verification error: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(UserErrorResponse {
                 success: false,
-                error: "Database error while retrieving user".to_string(),
-            }))
+                error: "Authentication error".to_string(),
+            }));
         }
     }
+
+    // Generate JWT
+    let token = jwt_auth.generate_token(&user.id, &user.email).map_err(|e| {
+        error!("JWT encoding error: {}", e);
+        actix_web::error::ErrorInternalServerError("Token generation error")
+    })?;
+
+    let user_response = UserResponse {
+        id: user.id.to_string(),
+        email: user.email,
+        public_key: user.public_key,
+        created_at: user.created_at,
+    };
+
+    Ok(HttpResponse::Ok().json(UserAuthResponse {
+        success: true,
+        token,
+        user: user_response,
+    }))
+}
+
+/// =======================
+/// Profile Endpoint
+/// =======================
+#[get("/profile")]
+pub async fn get_profile(
+    pool: web::Data<PgPool>,
+    req: HttpRequest,
+) -> Result<HttpResponse> {
+    let user_id = match get_user_id(&req) {
+        Ok(id) => id,
+        Err(err_response) => return Ok(err_response),
+    };
+
+    info!("Fetching profile for user {}", user_id);
+
+    let user = match sqlx::query!(
+        "SELECT id, email, public_key, created_at FROM users WHERE id = $1",
+        user_id
+    )
+    .fetch_optional(pool.as_ref())
+    .await
+    {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return Ok(HttpResponse::NotFound().json(UserErrorResponse {
+                success: false,
+                error: "User not found".to_string(),
+            }));
+        }
+        Err(e) => {
+            error!("Database error fetching profile: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(UserErrorResponse {
+                success: false,
+                error: "Database error".to_string(),
+            }));
+        }
+    };
+
+    let user_response = UserResponse {
+        id: user.id.to_string(),
+        email: user.email,
+        public_key: user.public_key,
+        created_at: user.created_at,
+    };
+
+    Ok(HttpResponse::Ok().json(user_response))
 }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Database - with offline feature for compile-time verification
+# Database - without offline feature (we'll use SQLX_OFFLINE env var)
 sqlx = { version = "0.7", features = [
     "runtime-tokio-rustls", 
     "postgres", 
@@ -13,8 +13,7 @@ sqlx = { version = "0.7", features = [
     "migrate", 
     "json",
     "bigdecimal",
-    "macros",
-    # "offline"  # Add this feature for offline mode
+    "macros"
 ] }
 
 # Cryptography and password hashing

@@ -1,268 +1,515 @@
-use anyhow::{Result, anyhow};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tracing::{info, error, warn};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use thiserror::Error;
+use tracing::{info, warn, error};
 use sha2::{Sha256, Digest};
-use hex;
+use std::time::Duration;
 
-/// Solana transaction structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Error, Debug)]
+pub enum SolanaError {
+    #[error("HTTP request failed: {0}")]
+    RequestFailed(#[from] reqwest::Error),
+    
+    #[error("RPC error: {0}")]
+    RpcError(String),
+    
+    #[error("Invalid address: {0}")]
+    InvalidAddress(String),
+    
+    #[error("Invalid public key: {0}")]
+    InvalidPublicKey(String),
+    
+    #[error("Invalid signature: {0}")]
+    InvalidSignature(String),
+    
+    #[error("Invalid transaction: {0}")]
+    InvalidTransaction(String),
+    
+    #[error("Encoding error: {0}")]
+    EncodingError(String),
+    
+    #[error("Transaction broadcast failed: {0}")]
+    BroadcastFailed(String),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Transaction {
+    pub message: Vec<u8>,
     pub signatures: Vec<String>,
-    pub message: TransactionMessage,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransactionMessage {
-    pub header: MessageHeader,
-    pub account_keys: Vec<String>,
-    pub recent_blockhash: String,
-    pub instructions: Vec<CompiledInstruction>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnsignedTransaction {
+    pub transaction_data: String,
+    pub message_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageHeader {
-    pub num_required_signatures: u8,
-    pub num_readonly_signed_accounts: u8,
-    pub num_readonly_unsigned_accounts: u8,
+#[derive(Debug, Serialize, Deserialize)]
+struct BlockhashResponse {
+    jsonrpc: String,
+    id: u64,
+    result: Option<BlockhashResult>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompiledInstruction {
-    pub program_id_index: u8,
-    pub accounts: Vec<u8>,
-    pub data: String,
+#[derive(Debug, Serialize, Deserialize)]
+struct BlockhashResult {
+    value: BlockhashValue,
 }
 
-/// Solana RPC client for blockchain operations
+#[derive(Debug, Serialize, Deserialize)]
+struct BlockhashValue {
+    blockhash: String,
+    last_valid_block_height: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TransactionResponse {
+    jsonrpc: String,
+    id: u64,
+    result: Option<String>,
+    error: Option<RpcError>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RpcError {
+    code: i32,
+    message: String,
+}
+
+#[derive(Clone)]
 pub struct SolanaBlockchain {
+    client: Client,
     rpc_url: String,
     commitment: String,
 }
 
 impl SolanaBlockchain {
     pub fn new(rpc_url: String, commitment: String) -> Self {
-        Self { rpc_url, commitment }
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to create HTTP client");
+        
+        Self {
+            client,
+            rpc_url,
+            commitment,
+        }
     }
-
-    /// Derive a Solana address from a public key
-    pub fn derive_solana_address(public_key: &str) -> Result<String> {
-        info!("Deriving Solana address from public key");
+    
+    /// Validate a Solana address format
+    pub fn validate_address(&self, address: &str) -> bool {
+        // Base58 encoded Solana addresses are typically 32-44 characters
+        if address.len() < 32 || address.len() > 44 {
+            return false;
+        }
         
-        // Validate public key format (should be hex encoded)
+        // Try to decode from base58
+        match bs58::decode(address).into_vec() {
+            Ok(decoded) => decoded.len() == 32,
+            Err(_) => false,
+        }
+    }
+    
+    /// Derive Solana address from Ed25519 public key
+    pub fn derive_solana_address(&self, public_key: &str) -> Result<String, SolanaError> {
+        // Validate the public key format (should be 64 hex characters = 32 bytes)
         if public_key.len() != 64 {
-            return Err(anyhow!("Invalid public key length: expected 64 characters"));
+            return Err(SolanaError::InvalidPublicKey(format!(
+                "Public key must be 64 hex characters (32 bytes), got {} characters", 
+                public_key.len()
+            )));
         }
         
-        // Decode hex public key
-        let pubkey_bytes = hex::decode(public_key)
-            .map_err(|e| anyhow!("Invalid hex public key: {}", e))?;
+        // Convert from hex to bytes
+        let bytes = hex::decode(public_key)
+            .map_err(|e| SolanaError::EncodingError(format!("Failed to decode public key: {}", e)))?;
         
-        if pubkey_bytes.len() != 32 {
-            return Err(anyhow!("Invalid public key: expected 32 bytes"));
-        }
+        // Convert to base58
+        let address = bs58::encode(&bytes).into_string();
         
-        // Convert to base58 Solana address
-        let address = bs58::encode(&pubkey_bytes).into_string();
-        
-        info!("Successfully derived Solana address: {}", address);
         Ok(address)
     }
-
-    /// Build a Solana transaction
-    pub async fn build_transaction(
-        &self,
-        from: &str,
-        to: &str,
-        lamports: u64,
-        recent_blockhash: &str,
-    ) -> Result<Transaction> {
-        info!("Building transaction: {} -> {} ({} lamports)", from, to, lamports);
-        
-        // Validate addresses
-        if !self.validate_address(from) || !self.validate_address(to) {
-            return Err(anyhow!("Invalid Solana address format"));
-        }
-        
-        // Create transfer instruction
-        let instruction = self.create_transfer_instruction(from, to, lamports)?;
-        
-        // Build transaction message
-        let message = TransactionMessage {
-            header: MessageHeader {
-                num_required_signatures: 1,
-                num_readonly_signed_accounts: 0,
-                num_readonly_unsigned_accounts: 1,
-            },
-            account_keys: vec![from.to_string(), to.to_string()],
-            recent_blockhash: recent_blockhash.to_string(),
-            instructions: vec![instruction],
-        };
-        
-        let transaction = Transaction {
-            signatures: vec![String::new()], // Empty signature placeholder
-            message,
-        };
-        
-        info!("Transaction built successfully");
-        Ok(transaction)
-    }
-
-    /// Sign a transaction with MPC signature
-    pub fn sign_transaction(&self, mut tx: Transaction, signature: &str) -> Result<Transaction> {
-        info!("Signing transaction with MPC signature");
-        
-        // Validate signature format
-        if signature.len() != 128 { // 64 bytes * 2 for hex
-            return Err(anyhow!("Invalid signature format: expected 128 hex characters"));
-        }
-        
-        // Decode hex signature
-        let sig_bytes = hex::decode(signature)
-            .map_err(|e| anyhow!("Invalid hex signature: {}", e))?;
-        
-        if sig_bytes.len() != 64 {
-            return Err(anyhow!("Invalid signature length: expected 64 bytes"));
-        }
-        
-        // Add signature to transaction
-        tx.signatures[0] = signature.to_string();
-        
-        info!("Transaction signed successfully");
-        Ok(tx)
-    }
-
-    /// Send a signed transaction to the Solana network
-    pub async fn send_transaction(&self, tx: Transaction) -> Result<String> {
-        info!("Sending transaction to Solana network");
-        
-        // Serialize transaction
-        let tx_bytes = bincode::serialize(&tx)
-            .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
-        
-        // Create RPC request
-        let request = serde_json::json!({
+    
+    /// Get recent blockhash from Solana network
+    pub async fn get_recent_blockhash(&self) -> Result<String, SolanaError> {
+        let request_body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "sendTransaction",
-            "params": [
-                BASE64.encode(&tx_bytes),
-                {
-                    "encoding": "base64",
-                    "skipPreflight": false,
-                    "preflightCommitment": self.commitment
-                }
-            ]
-        });
-        
-        // Send RPC request
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| anyhow!("RPC request failed: {}", e))?;
-        
-        let response_text = response.text().await
-            .map_err(|e| anyhow!("Failed to read response: {}", e))?;
-        
-        // Parse response
-        let response_json: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| anyhow!("Invalid JSON response: {}", e))?;
-        
-        if let Some(error) = response_json.get("error") {
-            let error_msg = error.get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Unknown RPC error");
-            return Err(anyhow!("RPC error: {}", error_msg));
-        }
-        
-        let signature = response_json.get("result")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("No signature in response"))?;
-        
-        info!("Transaction sent successfully: {}", signature);
-        Ok(signature.to_string())
-    }
-
-    /// Get recent blockhash from RPC
-    pub async fn get_recent_blockhash(&self) -> Result<String> {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getRecentBlockhash",
+            "method": "getLatestBlockhash",
             "params": [{
                 "commitment": self.commitment
             }]
         });
         
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self.client
             .post(&self.rpc_url)
-            .json(&request)
+            .json(&request_body)
             .send()
-            .await
-            .map_err(|e| anyhow!("RPC request failed: {}", e))?;
+            .await?;
         
-        let response_text = response.text().await
-            .map_err(|e| anyhow!("Failed to read response: {}", e))?;
+        let rpc_response: BlockhashResponse = response.json().await?;
         
-        let response_json: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| anyhow!("Invalid JSON response: {}", e))?;
-        
-        if let Some(error) = response_json.get("error") {
-            let error_msg = error.get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Unknown RPC error");
-            return Err(anyhow!("RPC error: {}", error_msg));
+        if let Some(error) = rpc_response.error {
+            return Err(SolanaError::RpcError(format!(
+                "Failed to get blockhash: {}: {}", 
+                error.code, 
+                error.message
+            )));
         }
         
-        let blockhash = response_json
-            .get("result")
-            .and_then(|v| v.get("value"))
-            .and_then(|v| v.get("blockhash"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("No blockhash in response"))?;
-        
-        Ok(blockhash.to_string())
+        Ok(rpc_response.result
+            .ok_or_else(|| SolanaError::RpcError("No blockhash in response".to_string()))?
+            .value
+            .blockhash)
     }
-
-    /// Validate Solana address format
-    pub fn validate_address(&self, address: &str) -> bool {
-        if address.len() < 32 || address.len() > 44 {
-            return false;
+    
+    /// Build a SOL transfer transaction
+    pub async fn build_sol_transfer(
+        &self, 
+        from_pubkey: &str, 
+        to_pubkey: &str, 
+        lamports: u64
+    ) -> Result<UnsignedTransaction, SolanaError> {
+        // Validate addresses
+        if !self.validate_address(from_pubkey) {
+            return Err(SolanaError::InvalidAddress(format!("Invalid sender address: {}", from_pubkey)));
         }
         
-        // Check if it's valid base58
-        bs58::decode(address).into_vec().is_ok()
+        if !self.validate_address(to_pubkey) {
+            return Err(SolanaError::InvalidAddress(format!("Invalid recipient address: {}", to_pubkey)));
+        }
+        
+        // Get recent blockhash
+        let blockhash = self.get_recent_blockhash().await?;
+        
+        // System program address
+        let system_program = "11111111111111111111111111111111";
+        
+        // Create transfer instruction
+        let transfer_data = self.encode_transfer_instruction(lamports);
+        
+        // Build transaction message
+        let message = self.build_transaction_message(
+            from_pubkey, 
+            system_program,
+            to_pubkey, 
+            &transfer_data, 
+            &blockhash
+        )?;
+        
+        // Calculate message hash for signing
+        let message_hash = hex::encode(self.calculate_message_hash(&message));
+        
+        // Return unsigned transaction
+        Ok(UnsignedTransaction {
+            transaction_data: hex::encode(&message),
+            message_hash,
+        })
     }
-
-    /// Create a transfer instruction
-    fn create_transfer_instruction(
+    
+    /// Build an SPL token transfer transaction
+    pub async fn build_token_transfer(
+        &self, 
+        from_pubkey: &str, 
+        to_pubkey: &str, 
+        mint: &str, 
+        amount: u64
+    ) -> Result<UnsignedTransaction, SolanaError> {
+        // Validate addresses
+        if !self.validate_address(from_pubkey) {
+            return Err(SolanaError::InvalidAddress(format!("Invalid sender address: {}", from_pubkey)));
+        }
+        
+        if !self.validate_address(to_pubkey) {
+            return Err(SolanaError::InvalidAddress(format!("Invalid recipient address: {}", to_pubkey)));
+        }
+        
+        if !self.validate_address(mint) {
+            return Err(SolanaError::InvalidAddress(format!("Invalid mint address: {}", mint)));
+        }
+        
+        // Get recent blockhash
+        let blockhash = self.get_recent_blockhash().await?;
+        
+        // Token program address
+        let token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+        
+        // Get or create source token account
+        let source_token_account = self.get_or_create_token_account(from_pubkey, mint).await?;
+        
+        // Get or create destination token account
+        let dest_token_account = self.get_or_create_token_account(to_pubkey, mint).await?;
+        
+        // Create token transfer instruction
+        let transfer_data = self.encode_token_transfer_instruction(amount);
+        
+        // Build transaction message for token transfer
+        // This is simplified - a real implementation would handle creating token accounts if needed
+        let message = self.build_token_transaction_message(
+            from_pubkey,
+            &source_token_account,
+            &dest_token_account,
+            token_program,
+            &transfer_data,
+            &blockhash
+        )?;
+        
+        // Calculate message hash for signing
+        let message_hash = hex::encode(self.calculate_message_hash(&message));
+        
+        // Return unsigned transaction
+        Ok(UnsignedTransaction {
+            transaction_data: hex::encode(&message),
+            message_hash,
+        })
+    }
+    
+    /// Apply signature and broadcast transaction
+    pub async fn broadcast_transaction(
+        &self,
+        transaction_data: &str,
+        signature: &str
+    ) -> Result<String, SolanaError> {
+        // Decode transaction data
+        let message = hex::decode(transaction_data)
+            .map_err(|e| SolanaError::EncodingError(format!("Failed to decode transaction data: {}", e)))?;
+        
+        // Decode signature
+        let signature_bytes = hex::decode(signature)
+            .map_err(|e| SolanaError::EncodingError(format!("Failed to decode signature: {}", e)))?;
+        
+        // Build signed transaction
+        let signed_tx = self.build_signed_transaction(message, signature_bytes)?;
+        
+        // Encode as base64 for RPC
+        let tx_base64 = base64::encode(&signed_tx);
+        
+        // Send transaction
+        let request_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                tx_base64,
+                {
+                    "encoding": "base64",
+                    "commitment": self.commitment,
+                    "skipPreflight": false
+                }
+            ]
+        });
+        
+        let response = self.client
+            .post(&self.rpc_url)
+            .json(&request_body)
+            .send()
+            .await?;
+        
+        let rpc_response: TransactionResponse = response.json().await?;
+        
+        if let Some(error) = rpc_response.error {
+            return Err(SolanaError::BroadcastFailed(format!(
+                "Failed to broadcast transaction: {}: {}", 
+                error.code, 
+                error.message
+            )));
+        }
+        
+        Ok(rpc_response.result
+            .ok_or_else(|| SolanaError::RpcError("No transaction ID in response".to_string()))?)
+    }
+    
+    /// Build a signed transaction from message and signature
+    fn build_signed_transaction(
+        &self,
+        message: Vec<u8>,
+        signature: Vec<u8>
+    ) -> Result<Vec<u8>, SolanaError> {
+        // In a real implementation, this would use Solana SDK to construct the transaction
+        // For now, we'll build a simplified format
+        
+        // Signature count (1)
+        let mut tx_data = vec![1];
+        
+        // Signature bytes
+        tx_data.extend_from_slice(&signature);
+        
+        // Message
+        tx_data.extend_from_slice(&message);
+        
+        Ok(tx_data)
+    }
+    
+    /// Build a transaction message
+    fn build_transaction_message(
         &self,
         from: &str,
+        program_id: &str,
         to: &str,
-        lamports: u64,
-    ) -> Result<CompiledInstruction> {
-        // System Program transfer instruction
+        instruction_data: &[u8],
+        recent_blockhash: &str
+    ) -> Result<Vec<u8>, SolanaError> {
+        // In a real implementation, this would use Solana SDK to construct the message
+        // For now, we'll build a simplified format
+        
+        // Decode addresses from base58
+        let from_bytes = bs58::decode(from)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress(from.to_string()))?;
+        
+        let to_bytes = bs58::decode(to)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress(to.to_string()))?;
+        
+        let program_bytes = bs58::decode(program_id)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress(program_id.to_string()))?;
+        
+        let blockhash_bytes = bs58::decode(recent_blockhash)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress("Invalid blockhash".to_string()))?;
+        
+        // Build simplified message format
+        let mut message = Vec::new();
+        
+        // Header (1 required signature, 0 read-only signed, 0 read-only unsigned)
+        message.push(1); // Num required signatures
+        message.push(0); // Num read-only signed
+        message.push(0); // Num read-only unsigned
+        
+        // Account addresses (3: from, to, program_id)
+        message.push(3); // Num account addresses
+        message.extend_from_slice(&from_bytes);
+        message.extend_from_slice(&to_bytes);
+        message.extend_from_slice(&program_bytes);
+        
+        // Recent blockhash
+        message.extend_from_slice(&blockhash_bytes);
+        
+        // Instructions (1)
+        message.push(1); // Num instructions
+        
+        // Instruction 0
+        message.push(2); // Program ID index
+        message.push(2); // Accounts array length
+        message.push(0); // From account index
+        message.push(1); // To account index
+        
+        // Instruction data length and bytes
+        message.push(instruction_data.len() as u8);
+        message.extend_from_slice(instruction_data);
+        
+        Ok(message)
+    }
+    
+    /// Build a token transaction message
+    fn build_token_transaction_message(
+        &self,
+        owner: &str,
+        from_token: &str,
+        to_token: &str,
+        token_program: &str,
+        instruction_data: &[u8],
+        recent_blockhash: &str
+    ) -> Result<Vec<u8>, SolanaError> {
+        // Decode addresses from base58
+        let owner_bytes = bs58::decode(owner)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress(owner.to_string()))?;
+        
+        let from_token_bytes = bs58::decode(from_token)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress(from_token.to_string()))?;
+        
+        let to_token_bytes = bs58::decode(to_token)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress(to_token.to_string()))?;
+        
+        let program_bytes = bs58::decode(token_program)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress(token_program.to_string()))?;
+        
+        let blockhash_bytes = bs58::decode(recent_blockhash)
+            .into_vec()
+            .map_err(|_| SolanaError::InvalidAddress("Invalid blockhash".to_string()))?;
+        
+        // Build simplified message format for token transfer
+        let mut message = Vec::new();
+        
+        // Header (1 required signature, 0 read-only signed, 2 read-only unsigned)
+        message.push(1); // Num required signatures
+        message.push(0); // Num read-only signed
+        message.push(2); // Num read-only unsigned
+        
+        // Account addresses (4: owner, from_token, to_token, token_program)
+        message.push(4); // Num account addresses
+        message.extend_from_slice(&owner_bytes);
+        message.extend_from_slice(&from_token_bytes);
+        message.extend_from_slice(&to_token_bytes);
+        message.extend_from_slice(&program_bytes);
+        
+        // Recent blockhash
+        message.extend_from_slice(&blockhash_bytes);
+        
+        // Instructions (1)
+        message.push(1); // Num instructions
+        
+        // Instruction 0
+        message.push(3); // Program ID index
+        message.push(3); // Accounts array length
+        message.push(1); // From token account index
+        message.push(2); // To token account index
+        message.push(0); // Owner account index
+        
+        // Instruction data length and bytes
+        message.push(instruction_data.len() as u8);
+        message.extend_from_slice(instruction_data);
+        
+        Ok(message)
+    }
+    
+    /// Get or create associated token account
+    async fn get_or_create_token_account(&self, owner: &str, mint: &str) -> Result<String, SolanaError> {
+        // This would normally use the Associated Token Program
+        // For simplicity, we're returning a derived address
+        let seed = format!("{}-{}", owner, mint);
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        let hash = hasher.finalize();
+        Ok(bs58::encode(&hash[..32]).into_string())
+    }
+    
+    /// Calculate message hash for signing
+    fn calculate_message_hash(&self, message: &[u8]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(message);
+        hasher.finalize().to_vec()
+    }
+    
+    /// Encode transfer instruction data
+    fn encode_transfer_instruction(&self, lamports: u64) -> Vec<u8> {
         let mut data = Vec::new();
         data.extend_from_slice(&2u32.to_le_bytes()); // Transfer instruction = 2
         data.extend_from_slice(&lamports.to_le_bytes());
-        
-        Ok(CompiledInstruction {
-            program_id_index: 0, // System Program
-            accounts: vec![0, 1], // from, to
-            data: BASE64.encode(&data),
-        })
+        data
+    }
+    
+    /// Encode token transfer instruction data
+    fn encode_token_transfer_instruction(&self, amount: u64) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.push(3); // Transfer instruction for SPL Token
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
     }
 }
 
-/// Create a default Solana blockchain client
+/// Create a default Solana blockchain instance
 pub fn create_solana_blockchain() -> SolanaBlockchain {
     let rpc_url = std::env::var("SOLANA_RPC_URL")
         .unwrap_or_else(|_| "https://api.devnet.solana.com".to_string());
+    
     let commitment = std::env::var("SOLANA_COMMITMENT")
         .unwrap_or_else(|_| "confirmed".to_string());
     
@@ -272,47 +519,47 @@ pub fn create_solana_blockchain() -> SolanaBlockchain {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_derive_solana_address() {
-        // Test with a valid public key
-        let pubkey = "1111111111111111111111111111111111111111111111111111111111111111";
-        let result = SolanaBlockchain::derive_solana_address(pubkey);
-        assert!(result.is_ok());
-        
-        // Test with invalid public key
-        let invalid_pubkey = "invalid";
-        let result = SolanaBlockchain::derive_solana_address(invalid_pubkey);
-        assert!(result.is_err());
-    }
-
+    
     #[test]
     fn test_validate_address() {
-        let blockchain = SolanaBlockchain::new("https://api.devnet.solana.com".to_string(), "confirmed".to_string());
+        let blockchain = create_solana_blockchain();
         
-        // Valid addresses
+        // Valid Solana addresses
         assert!(blockchain.validate_address("11111111111111111111111111111111"));
         assert!(blockchain.validate_address("So11111111111111111111111111111111111111112"));
         
         // Invalid addresses
-        assert!(!blockchain.validate_address(""));
         assert!(!blockchain.validate_address("invalid"));
-        assert!(!blockchain.validate_address("0x1234567890abcdef"));
+        assert!(!blockchain.validate_address("too_short"));
+        assert!(!blockchain.validate_address("11111111")); // Too short
     }
-
-    #[tokio::test]
-    async fn test_get_recent_blockhash() {
-        let blockchain = SolanaBlockchain::new("https://api.devnet.solana.com".to_string(), "confirmed".to_string());
+    
+    #[test]
+    fn test_derive_solana_address() {
+        let blockchain = create_solana_blockchain();
         
-        let result = blockchain.get_recent_blockhash().await;
-        match result {
-            Ok(blockhash) => {
-                assert!(!blockhash.is_empty());
-                println!("Got blockhash: {}", blockhash);
-            }
-            Err(e) => {
-                println!("Expected error in test environment: {}", e);
-            }
-        }
+        // Test with a known public key
+        let pubkey = "0000000000000000000000000000000000000000000000000000000000000000";
+        let result = blockchain.derive_solana_address(pubkey);
+        assert!(result.is_ok());
+        
+        // Invalid public key (too short)
+        let invalid_pubkey = "000000";
+        let result = blockchain.derive_solana_address(invalid_pubkey);
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_encode_transfer_instruction() {
+        let blockchain = create_solana_blockchain();
+        
+        // Test encoding for 1 SOL (1_000_000_000 lamports)
+        let data = blockchain.encode_transfer_instruction(1_000_000_000);
+        
+        // First 4 bytes should be 2u32 little-endian (transfer instruction)
+        assert_eq!(data[0..4], [2, 0, 0, 0]);
+        
+        // Next 8 bytes should be lamports amount
+        assert_eq!(data[4..12], 1_000_000_000u64.to_le_bytes());
     }
 }

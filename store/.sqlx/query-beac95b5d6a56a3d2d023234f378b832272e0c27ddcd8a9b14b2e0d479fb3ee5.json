@@ -31,7 +31,7 @@
       {
         "ordinal": 5,
         "name": "logo_url",
-        "type_info": "Text"
+        "type_info": "Varchar"
       },
       {
         "ordinal": 6,
@@ -51,7 +51,7 @@
         "Int4",
         "Varchar",
         "Varchar",
-        "Text"
+        "Varchar"
       ]
     },
     "nullable": [

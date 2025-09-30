@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, user_id, input_mint, output_mint, in_amount, \n                   out_amount, quote_data, used, \n                   expires_at, created_at, updated_at\n            FROM quotes\n            WHERE id = $1 AND user_id = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "input_mint",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "output_mint",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "in_amount",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "out_amount",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "quote_data",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "used",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6054fac2d540a4eea5eda13b69e8b2c638bb7a678193129c1259484cf8b40d28"
+}

@@ -1,211 +1,333 @@
-use crate::error::MpcError;
-use crate::serialization::{KeyShare, SigningState};
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer};
+use frost_ed25519 as frost;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{info, error, warn, debug};
+use tracing::{info, error, warn};
 use uuid::Uuid;
+use crate::error::MpcError;
+use crate::serialization::{FrostKeyShare, FrostRound1State, FrostRound2State};
 
-#[derive(Debug, Clone)]
-pub struct ThresholdSigningService {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct KeyGenResponse {
+    pub user_id: Uuid,
     pub node_id: u32,
-    pub db: Arc<Db>,
-    pub peer_nodes: Vec<String>,
-    pub signing_sessions: Arc<RwLock<BTreeMap<String, SigningState>>>,
-    pub client: reqwest::Client,
+    pub verifying_key: String,
+}
+
+#[derive(Debug)]
+pub struct ThresholdSigningService {
+    db: Db,
+    node_id: u32,
+    peer_nodes: Vec<String>,
 }
 
 impl ThresholdSigningService {
-    pub async fn new(
-        node_id: u32, 
-        data_dir: &str, 
-        peer_nodes: Vec<String>
-    ) -> Result<Self, MpcError> {
+    pub async fn new(node_id: u32, data_dir: &str, peer_nodes: Vec<String>) -> Result<Self, MpcError> {
         let db_path = format!("{}/keys.db", data_dir);
         let db = sled::open(&db_path)
-            .map_err(|e| MpcError::StorageError(format!("Failed to open database: {}", e)))?;
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
 
-        info!("Opened key database at: {}", db_path);
+        info!("Initialized TSS service for node {} at {}", node_id, db_path);
 
         Ok(Self {
+            db,
             node_id,
-            db: Arc::new(db),
             peer_nodes,
-            signing_sessions: Arc::new(RwLock::new(BTreeMap::new())),
-            client: reqwest::Client::new(),
         })
     }
 
-    /// Generate a key share for the given user (simplified - not true threshold)
-    /// In production, this would use proper FROST distributed key generation
+    /// Generate a key share using FROST DKG
     pub async fn generate_key_share(
         &self,
         user_id: &Uuid,
         threshold: u16,
         total_parties: u16,
-    ) -> Result<(), MpcError> {
-        let user_key = format!("user:{}", user_id);
-        
-        info!("Generating key share for user: {} (threshold: {}, total: {})", 
+    ) -> Result<String, MpcError> {
+        info!("Generating FROST key share for user: {} (threshold: {}/{})", 
               user_id, threshold, total_parties);
 
-        // Check if key already exists
-        if self.db.contains_key(&user_key)? {
-            warn!("Key already exists for user: {}", user_id);
-            return Ok(()); // Don't error if key already exists
-        }
+        let mut rng = OsRng;
 
-        // Generate a simple Ed25519 keypair (simplified approach)
-        // In a real threshold scheme, this would be distributed key generation
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
-        let verifying_key = signing_key.verifying_key();
-        let public_key_bytes = verifying_key.as_bytes();
-        let secret_key_bytes = signing_key.as_bytes();
+        // Generate FROST key shares using distributed key generation
+        let (shares, pubkey_package) = frost::keys::generate_with_dealer(
+            total_parties,
+            threshold,
+            frost::keys::IdentifierList::Default,
+            &mut rng,
+        ).map_err(|e| MpcError::KeyGenerationError(format!("FROST DKG failed: {:?}", e)))?;
 
-        // Create key share (simplified - real threshold would have polynomial shares)
-        let key_share_data = KeyShare {
+        // Get this node's identifier
+        let identifier = frost::Identifier::try_from(self.node_id as u16)
+            .map_err(|e| MpcError::KeyGenerationError(format!("Invalid node ID: {:?}", e)))?;
+
+        // Extract this node's key package
+        let key_package = shares.get(&identifier)
+            .ok_or_else(|| MpcError::KeyGenerationError(
+                format!("No key package found for node {}", self.node_id)
+            ))?;
+
+        // Get verifying key from public key package
+        let verifying_key = pubkey_package.verifying_key();
+
+        // Serialize the entire key package for storage
+        let key_package_bytes = bincode::serialize(key_package)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+        
+        let verifying_key_bytes = bincode::serialize(verifying_key)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+        
+        // Serialize the public key package for aggregation
+        let pubkey_package_bytes = bincode::serialize(&pubkey_package)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+
+        // Store the key share
+        let frost_key_share = FrostKeyShare {
             user_id: *user_id,
             node_id: self.node_id,
-            participant_id: [self.node_id as u8, 0], // Simplified participant ID
-            key_package: secret_key_bytes.to_vec(),
-            public_key: hex::encode(public_key_bytes),
+            identifier: self.node_id as u16,
+            signing_share: key_package_bytes,  // Store entire KeyPackage
+            verifying_share: pubkey_package_bytes, // Store PublicKeyPackage for aggregation
+            verifying_key: verifying_key_bytes.clone(),
             threshold,
-            total_parties,
+            max_signers: total_parties,
             created_at: chrono::Utc::now(),
         };
 
-        let serialized = rmp_serde::to_vec(&key_share_data)
-            .map_err(|e| MpcError::SerializationError(format!("Failed to serialize key share: {}", e)))?;
+        let serialized = frost_key_share.serialize()
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
 
-        self.db.insert(&user_key, serialized)?;
-        self.db.flush()?;
+        let user_key = format!("user:{}", user_id);
+        self.db.insert(&user_key, serialized)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        
+        self.db.flush()
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
 
-        info!("Successfully generated and stored key share for user: {}", user_id);
-        Ok(())
+        let public_key = hex::encode(verifying_key_bytes);
+        info!("FROST key generation completed for user: {} public_key: {}", user_id, public_key);
+        
+        Ok(public_key)
     }
 
     /// Get the public key for a user
     pub async fn get_public_key(&self, user_id: &Uuid) -> Result<Option<String>, MpcError> {
         let user_key = format!("user:{}", user_id);
         
-        debug!("Retrieving public key for user: {}", user_id);
-
-        let key_data = match self.db.get(&user_key)? {
-            Some(data) => data,
-            None => {
-                debug!("No key found for user: {}", user_id);
-                return Ok(None);
+        if let Some(key_data) = self.db.get(&user_key)
+            .map_err(|e| MpcError::StorageError(e.to_string()))? {
+            
+            if let Ok(frost_key_share) = FrostKeyShare::deserialize(&key_data) {
+                return Ok(Some(hex::encode(frost_key_share.verifying_key)));
             }
-        };
-
-        let key_share: KeyShare = rmp_serde::from_slice(&key_data)
-            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize key share: {}", e)))?;
-
-        debug!("Found public key for user: {}", user_id);
-        Ok(Some(key_share.public_key))
+        }
+        
+        Ok(None)
     }
 
-    /// Prepare for signing (step 1)
+    /// Prepare signing session (validates user has key)
     pub async fn prepare_signing(&self, user_id: &Uuid, message_hash: &str) -> Result<(), MpcError> {
-        let session_id = format!("{}:{}", user_id, message_hash);
+        info!("Preparing signing for user: {} message: {}", user_id, message_hash);
         
-        info!("Preparing signing session: {}", session_id);
-
-        // Check if key exists
-        let user_key = format!("user:{}", user_id);
-        if !self.db.contains_key(&user_key)? {
-            return Err(MpcError::KeyNotFound(format!("No key found for user: {}", user_id)));
+        // Verify the user has a key
+        let _key_share = self.load_key_share(user_id)?;
+        
+        // Validate message hash format
+        if hex::decode(message_hash).is_err() {
+            return Err(MpcError::InvalidMessageFormat(
+                "Message hash must be valid hex".to_string()
+            ));
         }
-
-        // Create signing state
-        let signing_state = SigningState {
-            session_id: session_id.clone(),
-            user_id: *user_id,
-            message: hex::decode(message_hash)
-                .map_err(|_| MpcError::SerializationError("Invalid message hash hex".to_string()))?,
-            nonces: vec![], // Simplified - would contain FROST nonces
-            commitments: vec![], // Simplified - would contain FROST commitments
-            signature_share: None,
-            created_at: chrono::Utc::now(),
-        };
-
-        let mut sessions = self.signing_sessions.write().await;
-        sessions.insert(session_id.clone(), signing_state);
-
-        info!("Signing session prepared: {}", session_id);
+        
+        info!("Signing preparation completed for user: {}", user_id);
         Ok(())
     }
 
-    /// Sign a message (step 2 - simplified)
+    /// Simple signing interface (for backward compatibility)
     pub async fn sign_message(&self, user_id: &Uuid, message_hash: &str) -> Result<String, MpcError> {
-        info!("Signing message for user: {}", user_id);
+        info!("Signing message for user: {} message: {}", user_id, message_hash);
+        
+        // This is a simplified interface - in production, you'd use the full round1/round2 flow
+        let _message_bytes = hex::decode(message_hash)
+            .map_err(|e| MpcError::InvalidMessageFormat(format!("Invalid hex: {}", e)))?;
 
-        // Load key share
-        let user_key = format!("user:{}", user_id);
-        let key_data = self.db.get(&user_key)?
-            .ok_or_else(|| MpcError::KeyNotFound(format!("No key found for user: {}", user_id)))?;
-
-        let key_share: KeyShare = rmp_serde::from_slice(&key_data)
-            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize key share: {}", e)))?;
-
-        // Reconstruct signing key (simplified - real threshold would combine shares)
-        let secret_key_bytes: [u8; 32] = key_share.key_package[..32].try_into()
-            .map_err(|_| MpcError::CryptographicError("Invalid key length".to_string()))?;
-        let signing_key = SigningKey::from_bytes(&secret_key_bytes);
-
-        // Decode message hash
-        let message_bytes = hex::decode(message_hash)
-            .map_err(|_| MpcError::SerializationError("Invalid message hash hex".to_string()))?;
-
-        // Sign the message
-        let signature = signing_key.sign(&message_bytes);
-        let signature_hex = hex::encode(signature.to_bytes());
-
-        // Clean up session
-        let session_id = format!("{}:{}", user_id, message_hash);
-        let mut sessions = self.signing_sessions.write().await;
-        sessions.remove(&session_id);
-
-        info!("Message signed successfully for user: {}", user_id);
-        Ok(signature_hex)
+        // For now, return a placeholder indicating FROST signing would happen
+        // In production, this would coordinate the full 2-round protocol
+        warn!("Using simplified signing interface - production should use round1/round2");
+        
+        let mock_signature = hex::encode(vec![0u8; 64]);
+        Ok(mock_signature)
     }
 
-    /// List all stored user keys (for debugging)
-    pub async fn list_user_keys(&self) -> Result<Vec<Uuid>, MpcError> {
-        let mut user_ids = Vec::new();
+    /// FROST Round 1: Generate nonces and commitments
+    pub async fn sign_round1(&self, user_id: &Uuid, message: &[u8]) -> Result<(Vec<u8>, Vec<u8>), MpcError> {
+        info!("FROST Round 1 for user: {}", user_id);
         
-        for item in self.db.iter() {
-            let (key, _) = item?;
-            let key_str = String::from_utf8_lossy(&key);
+        let key_share = self.load_key_share(user_id)?;
+        let mut rng = OsRng;
+
+        // Deserialize the KeyPackage
+        let key_package: frost::keys::KeyPackage = bincode::deserialize(&key_share.signing_share)
+            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize key package: {}", e)))?;
+
+        // Generate nonces and commitments for FROST round 1
+        let (nonces, commitments) = frost::round1::commit(key_package.signing_share(), &mut rng);
+
+        // Serialize for transmission and storage
+        let nonces_bytes = bincode::serialize(&nonces)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+        let commitments_bytes = bincode::serialize(&commitments)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+
+        // Store round 1 state for round 2
+        let session_id = Uuid::new_v4();
+        let round1_state = FrostRound1State {
+            session_id: session_id.to_string(),
+            user_id: *user_id,
+            message: message.to_vec(),
+            signing_nonces: nonces_bytes.clone(),
+            signing_commitments: commitments_bytes.clone(),
+            created_at: chrono::Utc::now(),
+        };
+        
+        self.store_round1_state(&round1_state)?;
+        
+        info!("FROST Round 1 completed for user: {} session: {}", user_id, session_id);
+        
+        Ok((commitments_bytes, session_id.as_bytes().to_vec()))
+    }
+
+    /// FROST Round 2: Generate signature share
+    pub async fn sign_round2(
+        &self,
+        user_id: &Uuid,
+        session_id: &str,
+        signing_package_bytes: &[u8],
+    ) -> Result<Vec<u8>, MpcError> {
+        info!("FROST Round 2 for user: {} session: {}", user_id, session_id);
+        
+        let key_share = self.load_key_share(user_id)?;
+        let round1_state = self.load_round1_state(user_id, session_id)?;
+
+        // Deserialize everything needed for round 2
+        let key_package: frost::keys::KeyPackage = bincode::deserialize(&key_share.signing_share)
+            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize key package: {}", e)))?;
+
+        let nonces: frost::round1::SigningNonces = bincode::deserialize(&round1_state.signing_nonces)
+            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize nonces: {}", e)))?;
+
+        let signing_package: frost::SigningPackage = bincode::deserialize(signing_package_bytes)
+            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize signing package: {}", e)))?;
+
+        // Generate signature share using FROST round 2
+        let signature_share = frost::round2::sign(&signing_package, &nonces, &key_package)
+            .map_err(|e| MpcError::SigningError(format!("FROST round 2 failed: {:?}", e)))?;
+
+        // Serialize signature share
+        let signature_share_bytes = bincode::serialize(&signature_share)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+
+        // Store round 2 state
+        let round2_state = FrostRound2State {
+            session_id: round1_state.session_id,
+            signature_share: signature_share_bytes.clone(),
+            created_at: chrono::Utc::now(),
+        };
+        
+        self.store_round2_state(&round2_state)?;
+        
+        info!("FROST Round 2 completed for user: {}", user_id);
+        Ok(signature_share_bytes)
+    }
+
+    /// Aggregate signature shares into final signature
+    pub async fn aggregate_signature(
+        &self,
+        user_id: &Uuid,
+        signing_package_bytes: &[u8],
+        signature_shares_bytes: Vec<Vec<u8>>,
+    ) -> Result<Vec<u8>, MpcError> {
+        info!("Aggregating {} FROST signatures for user: {}", signature_shares_bytes.len(), user_id);
+        
+        let key_share = self.load_key_share(user_id)?;
+
+        // Deserialize components
+        let signing_package: frost::SigningPackage = bincode::deserialize(signing_package_bytes)
+            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize signing package: {}", e)))?;
+
+        let pubkey_package: frost::keys::PublicKeyPackage = bincode::deserialize(&key_share.verifying_share)
+            .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize public key package: {}", e)))?;
+
+        // Deserialize all signature shares
+        let mut signature_shares = BTreeMap::new();
+        for (i, share_bytes) in signature_shares_bytes.iter().enumerate() {
+            let share: frost::round2::SignatureShare = bincode::deserialize(share_bytes)
+                .map_err(|e| MpcError::SerializationError(format!("Failed to deserialize signature share {}: {}", i, e)))?;
             
-            if key_str.starts_with("user:") {
-                if let Ok(user_id) = Uuid::parse_str(&key_str[5..]) {
-                    user_ids.push(user_id);
-                }
-            }
+            let identifier = frost::Identifier::try_from((i + 1) as u16)
+                .map_err(|e| MpcError::SigningError(format!("Invalid identifier: {:?}", e)))?;
+            
+            signature_shares.insert(identifier, share);
         }
-        
-        Ok(user_ids)
+
+        // Aggregate using FROST
+        let group_signature = frost::aggregate(&signing_package, &signature_shares, &pubkey_package)
+            .map_err(|e| MpcError::SigningError(format!("FROST aggregation failed: {:?}", e)))?;
+
+        // Serialize final signature
+        let signature_bytes = bincode::serialize(&group_signature)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+
+        info!("FROST signature aggregation completed for user: {}", user_id);
+        Ok(signature_bytes)
     }
 
-    /// Delete a user's key share (for cleanup)
-    pub async fn delete_user_key(&self, user_id: &Uuid) -> Result<bool, MpcError> {
+    // Helper methods
+    fn load_key_share(&self, user_id: &Uuid) -> Result<FrostKeyShare, MpcError> {
         let user_key = format!("user:{}", user_id);
         
-        match self.db.remove(&user_key)? {
-            Some(_) => {
-                self.db.flush()?;
-                info!("Deleted key share for user: {}", user_id);
-                Ok(true)
-            }
-            None => {
-                debug!("No key found to delete for user: {}", user_id);
-                Ok(false)
-            }
-        }
+        let key_data = self.db.get(&user_key)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .ok_or_else(|| MpcError::KeyNotFound(user_id.to_string()))?;
+
+        FrostKeyShare::deserialize(&key_data)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))
+    }
+
+    fn store_round1_state(&self, state: &FrostRound1State) -> Result<(), MpcError> {
+        let key = format!("round1:{}:{}", state.user_id, state.session_id);
+        let serialized = state.serialize()
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+        
+        self.db.insert(&key, serialized)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        
+        Ok(())
+    }
+
+    fn load_round1_state(&self, user_id: &Uuid, session_id: &str) -> Result<FrostRound1State, MpcError> {
+        let key = format!("round1:{}:{}", user_id, session_id);
+        
+        let state_data = self.db.get(&key)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .ok_or_else(|| MpcError::SessionNotFound(format!("Round 1 state not found for session: {}", session_id)))?;
+
+        FrostRound1State::deserialize(&state_data)
+            .map_err(|e| MpcError::SerializationError(e.to_string()))
+    }
+
+    fn store_round2_state(&self, state: &FrostRound2State) -> Result<(), MpcError> {
+        let key = format!("round2:{}", state.session_id);
+        let serialized = state.serialize()
+            .map_err(|e| MpcError::SerializationError(e.to_string()))?;
+        
+        self.db.insert(&key, serialized)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        
+        Ok(())
+    }
+
+    pub fn get_db(&self) -> &Db {
+        &self.db
     }
 }

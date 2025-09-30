@@ -1,0 +1,33 @@
+-- Fix schema issues for Step 3.2
+
+-- Add last_updated to balances if it doesn't exist
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name='balances' AND column_name='last_updated'
+    ) THEN
+        ALTER TABLE balances ADD COLUMN last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    END IF;
+END $$;
+
+-- Ensure all required indexes exist
+CREATE INDEX IF NOT EXISTS idx_balances_last_updated ON balances(last_updated);
+
+-- Grant all permissions to postgres user
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO postgres;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO postgres;
+
+-- Ensure default assets exist with proper IDs
+INSERT INTO assets (mint_address, decimals, name, symbol)
+VALUES 
+    ('So11111111111111111111111111111111111111112', 9, 'Solana', 'SOL'),
+    ('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 6, 'USD Coin', 'USDC'),
+    ('Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', 6, 'Tether USD', 'USDT')
+ON CONFLICT (mint_address) DO NOTHING;
+
+-- Verify permissions
+GRANT SELECT, INSERT, UPDATE, DELETE ON users TO postgres;
+GRANT SELECT, INSERT, UPDATE, DELETE ON assets TO postgres;
+GRANT SELECT, INSERT, UPDATE, DELETE ON balances TO postgres;
+GRANT SELECT, INSERT, UPDATE, DELETE ON quotes TO postgres;

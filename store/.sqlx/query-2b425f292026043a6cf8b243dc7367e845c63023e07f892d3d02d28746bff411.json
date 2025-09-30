@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM quotes WHERE expires_at < NOW() AND used = false",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "2b425f292026043a6cf8b243dc7367e845c63023e07f892d3d02d28746bff411"
+}

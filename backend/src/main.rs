@@ -1,160 +1,83 @@
-mod middleware;
-mod routes;
-mod services;
-mod models;
-mod blockchain;
-use store::Store;
-use tracing_actix_web::TracingLogger;
-use tracing_subscriber::{fmt, EnvFilter};
-
-use actix_cors::Cors;
-use actix_web::{web, App, HttpResponse, HttpServer, Result};
+use actix_web::{web, App, HttpServer, middleware::Logger};
 use dotenv::dotenv;
-use middleware::{AuthMiddleware, JwtAuth, RateLimitMiddleware, ApiMetrics};
-use routes::{solana, user, wallet, api, solana_v1};
-use blockchain::{SolanaBlockchain, create_solana_blockchain};
-use services::{create_default_mpc_client, create_jupiter_client, create_solana_client};
+use env_logger::Env;
 use sqlx::PgPool;
-use std::env;
-use std::sync::Arc;
-use tracing::{info, error};
-use prometheus::{Registry, Encoder, TextEncoder};
-use utoipa_swagger_ui::SwaggerUi;
-use utoipa::OpenApi;
+use std::{env, sync::Arc};
 
-pub struct AppState {
-    pub db: PgPool,
-    pub store: Store,
-    pub jwt_auth: JwtAuth,
-    pub mpc_client: services::MpcClient,
-    pub jupiter_client: services::JupiterClient,
-    pub solana_blockchain: SolanaBlockchain,
-    pub solana_client: services::SolanaClient,
-}
+mod routes;
+mod middleware;
+mod services;
+mod error;
 
-async fn health() -> Result<HttpResponse> {
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "status": "healthy",
-        "service": "solana-wallet-backend",
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    })))
-}
-
-async fn metrics() -> Result<HttpResponse> {
-    let registry = Registry::new();
-    let encoder = TextEncoder::new();
-    let metric_families = registry.gather();
-    let mut buffer = Vec::new();
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    let response = String::from_utf8(buffer).unwrap();
-    
-    Ok(HttpResponse::Ok()
-        .content_type("text/plain; version=0.0.4; charset=utf-8")
-        .body(response))
-}
+use middleware::auth::{JwtAuth, AuthMiddleware};
+use services::mpc::MpcClient;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Initialize environment variables
     dotenv().ok();
-    
-    // Initialize tracing
-    fmt()
-        .with_env_filter(EnvFilter::new("backend=info,sqlx=warn"))
-        .init();
+    env_logger::init_from_env(Env::default().default_filter_or("info"));
 
-    info!("Starting Solana Wallet Backend...");
-
-    // Get configuration from environment
     let database_url = env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set");
+    
     let jwt_secret = env::var("JWT_SECRET")
-        .expect("JWT_SECRET must be set");
-    let bind_address = env::var("BIND_ADDRESS")
-        .unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+        .unwrap_or_else(|_| "your-secret-key-change-in-production-min-32-chars-long".to_string());
+    
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("Failed to create database pool");
 
-    // Initialize database connection pool and store
-    info!("Connecting to database...");
-    let store = match Store::from_url(&database_url).await {
-        Ok(store) => {
-            info!("Database connection established");
-            store
-        }
-        Err(e) => {
-            error!("Failed to connect to database: {}", e);
-            std::process::exit(1);
-        }
+    // Initialize JWT auth
+    let jwt_auth = JwtAuth::new(jwt_secret);
+
+    // Initialize MPC client
+    let mpc_node_urls = vec![
+        env::var("MPC_NODE_1_URL").unwrap_or_else(|_| "http://localhost:8001".to_string()),
+        env::var("MPC_NODE_2_URL").unwrap_or_else(|_| "http://localhost:8002".to_string()),
+        env::var("MPC_NODE_3_URL").unwrap_or_else(|_| "http://localhost:8003".to_string()),
+    ];
+
+    let mpc_config = services::mpc::MpcConfig {
+        node_urls: mpc_node_urls,
+        request_timeout: std::time::Duration::from_secs(30),
+        max_retries: 3,
+        initial_backoff: std::time::Duration::from_millis(100),
+        max_backoff: std::time::Duration::from_secs(5),
+        load_balancing: services::mpc::LoadBalancingStrategy::HealthBased,
+        signing_threshold: 2,
+        circuit_breaker_threshold: 5,
+        circuit_breaker_timeout: std::time::Duration::from_secs(30),
     };
 
-    // Initialize services
-    let jwt_auth = JwtAuth::new(jwt_secret);
-    let mpc_client = create_default_mpc_client();
-    let solana_blockchain = create_solana_blockchain();
-    let jupiter_client = create_jupiter_client();
-    let solana_client = create_solana_client();
-    
-    // Initialize Prometheus metrics
-    let registry = Registry::new();
-    let api_metrics = Arc::new(ApiMetrics::new(&registry).expect("Failed to create API metrics"));
-    
-    // Initialize rate limiter
-    let rate_limiter = RateLimitMiddleware::default();
-    
-    info!("Initialized all services successfully");
-    
-    // Create application state
-    let app_state = web::Data::new(AppState {
-        db: store.pool.clone(),
-        store,
-        jwt_auth: jwt_auth.clone(),
-        mpc_client,
-        solana_blockchain,
-        jupiter_client,
-        solana_client,
-    });
+    let mpc_client = Arc::new(MpcClient::new(mpc_config));
 
-    info!("Starting HTTP server on {}", bind_address);
+    let bind_address = "127.0.0.1:8080";
+    println!("🚀 Starting server at http://{}", bind_address);
 
-    // Start HTTP server
     HttpServer::new(move || {
-        let cors = Cors::default()
-            .allow_any_origin()
-            .allow_any_method()
-            .allow_any_header()
-            .max_age(3600);
-
         App::new()
-            .app_data(app_state.clone())
-            .app_data(web::Data::new(rate_limiter.clone()))
-            .app_data(web::Data::new(api_metrics.clone()))
-            .wrap(cors)
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(jwt_auth.clone()))
+            .app_data(web::Data::new(mpc_client.clone())) // Add MPC client
             .wrap(AuthMiddleware::new(jwt_auth.clone()))
-            .wrap(TracingLogger::default())
-            .service(
-                SwaggerUi::new("/api/docs/{_:.*}")
-                    .url("/api-docs/openapi.json", api::ApiDoc::openapi())
-            )
-            .route("/health", web::get().to(health))
-            .route("/metrics", web::get().to(metrics))
+            .wrap(Logger::default())
             .service(
                 web::scope("/api")
                     .service(
                         web::scope("/user")
-                            .route("/signup", web::post().to(user::sign_up))
-                            .route("/signin", web::post().to(user::sign_in))
-                            .route("/profile", web::get().to(user::get_user))
+                            .service(routes::user::sign_up)
+                            .service(routes::user::sign_in)
+                            .service(routes::user::get_profile)
                     )
                     .service(
                         web::scope("/solana")
-                            .route("/balance", web::get().to(solana::get_balance))
-                            .route("/quote", web::post().to(solana::get_quote))
-                            .route("/swap", web::post().to(solana::execute_swap))
-                            .route("/send", web::post().to(solana::send_tokens))
+                            .service(routes::solana::get_balance)
+                            .service(routes::solana::get_quote)
+                            .service(routes::solana::execute_swap)
+                            .service(routes::solana::send_tokens)
                     )
-                    .configure(wallet::config)
-                    .configure(api::config)
-                    .configure(solana_v1::config)
             )
+            .service(routes::health::health_check)
     })
     .bind(bind_address)?
     .run()

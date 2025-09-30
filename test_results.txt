@@ -1,0 +1,385 @@
+warning: unused import: `sqlx::PgPool`
+ --> /Users/vansh/Coding/SuperDevs/Assignments/purge-assignment/store/src/quote.rs:3:5
+  |
+3 | use sqlx::PgPool;
+  |     ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: `store` (lib) generated 1 warning (run `cargo fix --lib -p store` to apply 1 suggestion)
+warning: unused import: `uuid::Uuid`
+ --> src/routes/user.rs:7:5
+  |
+7 | use uuid::Uuid;
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `WalletError`
+ --> src/routes/wallet.rs:8:21
+  |
+8 |     HealthResponse, WalletError
+  |                     ^^^^^^^^^^^
+
+warning: unused import: `Transaction`
+ --> src/routes/solana_v1.rs:2:43
+  |
+2 | use crate::blockchain::{SolanaBlockchain, Transaction};
+  |                                           ^^^^^^^^^^^
+
+warning: unused import: `uuid::Uuid`
+ --> src/routes/solana_v1.rs:8:5
+  |
+8 | use uuid::Uuid;
+  |     ^^^^^^^^^^
+
+warning: unused imports: `HistogramVec`, `IntCounterVec`, and `Opts`
+  --> src/routes/solana_v1.rs:10:33
+   |
+10 | use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts};
+   |                                 ^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^
+
+warning: unused imports: `HttpResponse` and `body::BoxBody`
+ --> src/middleware/rate_limit.rs:3:5
+  |
+3 |     body::BoxBody,
+  |     ^^^^^^^^^^^^^
+4 |     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
+5 |     Error, HttpMessage, HttpResponse,
+  |                         ^^^^^^^^^^^^
+
+warning: unused import: `ResponseError`
+ --> src/models/api_response.rs:2:31
+  |
+2 | use actix_web::{HttpResponse, ResponseError};
+  |                               ^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src/blockchain/solana.rs:3:5
+  |
+3 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `error` and `warn`
+ --> src/blockchain/solana.rs:4:21
+  |
+4 | use tracing::{info, error, warn};
+  |                     ^^^^^  ^^^^
+
+warning: unused import: `Sha256`
+ --> src/blockchain/solana.rs:6:12
+  |
+6 | use sha2::{Sha256, Digest};
+  |            ^^^^^^
+
+warning: unused variable: `request`
+   --> src/services/solana.rs:141:13
+    |
+141 |         let request = RpcRequest {
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `data`
+  --> src/routes/solana_v1.rs:56:5
+   |
+56 |     data: web::Data<AppState>,
+   |     ^^^^ help: if this is intentional, prefix it with an underscore: `_data`
+
+warning: unused import: `Digest`
+ --> src/blockchain/solana.rs:6:20
+  |
+6 | use sha2::{Sha256, Digest};
+  |                    ^^^^^^
+
+warning: unused variable: `from`
+   --> src/blockchain/solana.rs:246:9
+    |
+246 |         from: &str,
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_from`
+
+warning: unused variable: `to`
+   --> src/blockchain/solana.rs:247:9
+    |
+247 |         to: &str,
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_to`
+
+warning: field `url` is never read
+   --> src/services/mpc.rs:185:5
+    |
+184 | struct NodeHealth {
+    |        ---------- field in this struct
+185 |     url: String,
+    |     ^^^
+    |
+    = note: `NodeHealth` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` on by default
+
+warning: field `store` is never read
+   --> src/services/wallet_service.rs:138:5
+    |
+136 | pub struct WalletService {
+    |            ------------- field in this struct
+137 |     mpc_client: MpcClient,
+138 |     store: Store,
+    |     ^^^^^
+
+warning: `backend` (lib) generated 17 warnings (run `cargo fix --lib -p backend` to apply 10 suggestions)
+warning: unused import: `ClusterStatus`
+ --> tests/test_step_3_1_complete.rs:5:62
+  |
+5 |     MpcClient, MpcError, RetryConfig, LoadBalancingStrategy, ClusterStatus,
+  |                                                              ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: `backend` (test "test_step_3_1_complete") generated 1 warning (run `cargo fix --test "test_step_3_1_complete"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+     Running tests/test_step_3_1_complete.rs (target/debug/deps/test_step_3_1_complete-f494886f10f3b0f2)
+
+running 16 tests
+
+🧪 TEST 2: Message Signing - Success Case
+=========================================
+
+🧪 TEST 5: Public Health Check API
+===================================
+
+🧪 TEST 8: Health-Based Load Balancing
+
+🧪 TEST 4: Threshold Availability Check
+=======================================
+
+🧪 TEST 3: Transaction Signing - Success Case
+=============================================
+========================================
+
+🧪 TEST 7: Round-Robin Load Balancing
+======================================
+
+🧪 TEST 6: Cluster Status Details
+==================================
+
+🧪 TEST 1: Key Generation - Success Case
+==========================================
+📝 Checking if threshold (2/3) nodes are available...
+📝 Calling health_check() API...
+📝 Generating key for user: a63a6264-c29a-4b65-950d-03bbd0a8afc2
+📝 Getting detailed cluster status...
+📝 Step 1: Generating key for user: 33bc019a-4caf-4662-a34b-f84f345819d8
+📝 Testing health-based distribution with 5 requests...
+📝 Step 1: Generating key for user: 5698ab06-56d5-40d6-83f8-6816b8585162
+📝 Testing round-robin distribution with 5 requests...
+   Result: ❌ Not Available
+   Time taken: 5.911917ms
+⚠️  Key generation failed, but continuing with signing test: Insufficient nodes responded: 0/2
+
+📝 Step 2: Signing message: deadbeef
+
+thread 'test_04_threshold_availability_check' panicked at tests/test_step_3_1_complete.rs:165:5:
+Expected at least 2 nodes to be available
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+   Request 1: ❌ Failed - Insufficient nodes responded: 0/2
+❌ Key generation failed: Insufficient nodes responded: 0/2
+
+📝 Step 2: Signing transaction hash: cafebabe
+✅ Health check successful!
+   Status: degraded
+   Total nodes: 3
+   Healthy nodes: 0
+   Threshold: 2
+   Threshold met: false
+   Time taken: 6.415583ms
+
+   Node Details:
+   ❌ http://localhost:8001 - Healthy: false
+      Last error: HTTP request failed: error sending request for url (http://localhost:8001/health): error trying to connect: tcp connect error: Connection refused (os error 61)
+   ❌ http://localhost:8002 - Healthy: false
+      Last error: HTTP request failed: error sending request for url (http://localhost:8002/health): error trying to connect: tcp connect error: Connection refused (os error 61)
+   ❌ http://localhost:8003 - Healthy: false
+      Last error: HTTP request failed: error sending request for url (http://localhost:8003/health): error trying to connect: tcp connect error: Connection refused (os error 61)
+
+thread 'test_05_health_check_api' panicked at tests/test_step_3_1_complete.rs:199:13:
+assertion failed: status.healthy_nodes >= 2
+
+thread 'test_01_generate_key_success' panicked at tests/test_step_3_1_complete.rs:67:13:
+Expected successful key generation, got error: Insufficient nodes responded: 0/2
+✅ Cluster status retrieved!
+   Status: degraded
+   Operational: false
+
+thread 'test_06_get_cluster_status' panicked at tests/test_step_3_1_complete.rs:225:13:
+assertion failed: status.healthy_nodes >= 2
+   Request 1: ❌ Failed - Insufficient nodes responded: 0/2
+test test_06_get_cluster_status ... FAILED
+test test_05_health_check_api ... FAILED
+test test_04_threshold_availability_check ... FAILED
+test test_01_generate_key_success ... FAILED
+
+🧪 TEST 9: Random Load Balancing
+=================================
+
+🧪 TEST 12: Insufficient Nodes Error Handling
+==============================================
+
+🧪 TEST 10: Retry Logic on Transient Failures
+==============================================
+📝 Attempting operation with all nodes unavailable...
+📝 Configured with max_retries=3, base_delay=50ms
+📝 Attempting operation that may fail...
+
+🧪 TEST 11: Custom Retry Configuration
+=======================================
+📝 Testing with aggressive retry config:
+   Max retries: 5
+   Base delay: 25ms
+   Max delay: 500ms
+   Backoff: 1.5x
+📝 Testing random distribution with 5 requests...
+❌ Transaction signing failed: Insufficient nodes responded: 0/2
+
+thread 'test_03_sign_transaction_success' panicked at tests/test_step_3_1_complete.rs:140:13:
+Expected successful transaction signing, got error: Insufficient nodes responded: 0/2
+❌ Signing failed: Insufficient nodes responded: 0/2
+
+thread 'test_02_sign_message_success' panicked at tests/test_step_3_1_complete.rs:106:13:
+Expected successful signing, got error: Insufficient nodes responded: 0/2
+test test_02_sign_message_success ... FAILED
+
+🧪 TEST 13: Network Timeout Handling
+=====================================
+test test_03_sign_transaction_success ... FAILED
+📝 Testing with 1ms timeout (will likely fail)...
+
+🧪 TEST 14: Concurrent Operations (10 parallel requests)
+=========================================================
+📝 Launching 10 concurrent key generation requests...
+❌ Operation failed after all retries
+   Error: Insufficient nodes responded: 0/2
+   Total time: 8.350875ms
+test test_10_retry_on_transient_failure ... ok
+
+🧪 TEST 15: Sequential Operations Performance
+==============================================
+📝 Running 5 sequential operations...
+❌ Failed even with aggressive retry: Insufficient nodes responded: 0/2
+test test_11_custom_retry_config ... ok
+   Request 1: ❌ Failed - Insufficient nodes responded: 0/2
+✅ Correctly failed with error: Insufficient nodes responded: 0/2
+   Available: 0
+   Required: 2
+
+🎯 FINAL VALIDATION: Step 3.1 Complete Checklist
+==================================================
+
+□ generate_key() implementation
+test test_12_insufficient_nodes_error ... ok
+✅ Correctly handled timeout: Insufficient nodes responded: 0/2
+test test_13_network_timeout_handling ... ok
+   Request 1: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 2: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 3: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 4: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 5: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 6: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 7: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 8: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 9: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 10: ❌ Failed - Insufficient nodes responded: 0/2
+
+📊 Results:
+   Total time: 8.239167ms
+   Successful: 0/10
+   Failed: 10/10
+   Average time per request: 823.916µs
+
+thread 'test_14_concurrent_operations' panicked at tests/test_step_3_1_complete.rs:518:5:
+Expected at least 70% success rate
+test test_14_concurrent_operations ... FAILED
+   Operation 1: ❌ Insufficient nodes responded: 0/2
+  ❌ FAIL: generate_key() failed - Insufficient nodes responded: 0/2
+
+□ sign_message() implementation
+   Operation 2: ❌ Insufficient nodes responded: 0/2
+  ❌ FAIL: sign_message() failed - Insufficient nodes responded: 0/2
+
+□ sign_transaction() implementation
+   Operation 3: ❌ Insufficient nodes responded: 0/2
+   Operation 4: ❌ Insufficient nodes responded: 0/2
+   Operation 5: ❌ Insufficient nodes responded: 0/2
+
+📊 Total time for 5 operations: 11.21975ms
+   Average time per operation: 2.24395ms
+test test_15_sequential_operations_performance ... ok
+  ❌ FAIL: sign_transaction() failed - Insufficient nodes responded: 0/2
+
+□ health_check() public API
+  ✅ PASS: health_check() API works
+
+□ check_threshold_availability() implementation
+  ❌ FAIL: Threshold not available
+
+□ Load Balancing implementation
+  ❌ FAIL: Load balancing failed - Insufficient nodes responded: 0/2
+
+□ Retry Logic with exponential backoff
+  ⚠️  WARN: Retry test failed - Insufficient nodes responded: 0/2 (may be expected)
+
+□ Circuit Breaker integration
+  ✅ PASS: Circuit breaker integrated (health tracking works)
+
+     Cluster status: degraded
+□ Comprehensive error handling
+  ✅ PASS: Error handling works correctly
+
+□ Public health check API exposed
+  ✅ PASS: Public health_check() API works
+     Status: degraded, Healthy: 0/3
+
+==================================================
+📊 STEP 3.1 VALIDATION RESULTS
+==================================================
+Passed: 4/10 tests
+Success Rate: 40%
+
+⚠️  SOME TESTS FAILED - Review implementation
+
+Failed tests: 6
+
+thread 'test_99_complete_step_3_1_validation' panicked at tests/test_step_3_1_complete.rs:754:5:
+Expected at least 70% pass rate, got 40%
+test test_99_complete_step_3_1_validation ... FAILED
+   Request 2: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 2: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 2: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 3: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 3: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 3: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 4: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 4: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 4: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 5: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 5: ❌ Failed - Insufficient nodes responded: 0/2
+   Request 5: ❌ Failed - Insufficient nodes responded: 0/2
+✅ Round-robin test completed
+✅ Health-based test completed
+test test_07_round_robin_load_balancing ... ok
+test test_08_health_based_load_balancing ... ok
+✅ Random load balancing test completed
+test test_09_random_load_balancing ... ok
+
+failures:
+
+failures:
+    test_01_generate_key_success
+    test_02_sign_message_success
+    test_03_sign_transaction_success
+    test_04_threshold_availability_check
+    test_05_health_check_api
+    test_06_get_cluster_status
+    test_14_concurrent_operations
+    test_99_complete_step_3_1_validation
+
+test result: FAILED. 8 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+error: test failed, to rerun pass `--test test_step_3_1_complete`
