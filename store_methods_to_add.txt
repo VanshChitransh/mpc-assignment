@@ -1,0 +1,91 @@
+    /// Update user's public key after MPC key generation
+    pub async fn update_user_public_key(&self, user_id: &Uuid, public_key: &str) -> Result<(), UserError> {
+        let result = sqlx::query!(
+            "UPDATE users SET public_key = $1, updated_at = NOW() WHERE id = $2",
+            public_key,
+            user_id
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| UserError::DatabaseError(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(UserError::UserNotFound);
+        }
+
+        Ok(())
+    }
+
+    /// Get user's public key
+    pub async fn get_user_public_key(&self, user_id: &Uuid) -> Result<Option<String>, UserError> {
+        let result = sqlx::query!(
+            "SELECT public_key FROM users WHERE id = $1",
+            user_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| UserError::DatabaseError(e.to_string()))?;
+
+        Ok(result.and_then(|r| r.public_key))
+    }
+
+    /// Get balance for a specific asset
+    pub async fn get_balance(&self, user_id: &Uuid, asset_id: &Uuid) -> Result<i64, BalanceError> {
+        let balance = sqlx::query!(
+            "SELECT amount FROM balances WHERE user_id = $1 AND asset_id = $2",
+            user_id,
+            asset_id
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| BalanceError::DatabaseError(e.to_string()))?;
+
+        Ok(balance.map(|b| b.amount).unwrap_or(0))
+    }
+
+    /// Update balance for a specific asset
+    pub async fn update_balance(&self, user_id: &Uuid, asset_id: &Uuid, amount: i64) -> Result<(), BalanceError> {
+        sqlx::query!(
+            r#"
+            INSERT INTO balances (id, user_id, asset_id, amount, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, NOW(), NOW())
+            ON CONFLICT (user_id, asset_id) 
+            DO UPDATE SET amount = $4, updated_at = NOW()
+            "#,
+            Uuid::new_v4(),
+            user_id,
+            asset_id,
+            amount
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| BalanceError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Get asset by mint address
+    pub async fn get_asset_by_mint(&self, mint: &str) -> Result<Asset, BalanceError> {
+        sqlx::query_as!(
+            Asset,
+            "SELECT id, mint_address, decimals, name, symbol, logo_url, created_at, updated_at FROM assets WHERE mint_address = $1",
+            mint
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| BalanceError::DatabaseError(e.to_string()))?
+        .ok_or_else(|| BalanceError::AssetNotFoundByMint(mint.to_string()))
+    }
+
+    /// Get asset by symbol
+    pub async fn get_asset_by_symbol(&self, symbol: &str) -> Result<Asset, BalanceError> {
+        sqlx::query_as!(
+            Asset,
+            "SELECT id, mint_address, decimals, name, symbol, logo_url, created_at, updated_at FROM assets WHERE symbol = $1",
+            symbol
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| BalanceError::DatabaseError(e.to_string()))?
+        .ok_or_else(|| BalanceError::AssetNotFoundBySymbol(symbol.to_string()))
+    }

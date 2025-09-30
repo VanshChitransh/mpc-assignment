@@ -1,27 +1,14 @@
-# Root workspace Cargo.toml
-[workspace]
-members = [
-    "backend",
-    "store", 
-    "mpc",
-]
-exclude = [
-    "indexer",
-]
-resolver = "2"
+[package]
+name = "simple-server"
+version = "0.1.0"
+edition = "2021"
 
-[workspace.dependencies]
-# Common dependencies across workspace
-tokio = { version = "1.35", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-uuid = { version = "1.0", features = ["v4", "serde"] }
+[[bin]]
+name = "simple-server"
+path = "simple_server.rs"
+
+[dependencies]
+actix-web = "4.11.0"
+serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-anyhow = "1.0"
-thiserror = "1.0"
-dotenvy = "0.15"
-
-# Remove conflicting patches or fix them
-[patch.crates-io]
-# Only include patches if you specifically need them
-# Remove or comment out conflicting curve25519-dalek patches
+tokio = { version = "1.0", features = ["full"] }

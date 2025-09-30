@@ -250,6 +250,15 @@ pub async fn sign_in(
             
             // Parse user ID as UUID for token generation
             let user_uuid = user.id;
+                Ok(uuid) => uuid,
+                Err(e) => {
+                    error!("Failed to parse user ID as UUID: {} - Error: {}", user.id, e);
+                    return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                        success: false,
+                        error: "Internal error processing authentication".to_string(),
+                    }));
+                }
+            };
             
             info!("Generating JWT token for user: {}", user_uuid);
             

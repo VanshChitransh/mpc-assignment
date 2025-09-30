@@ -12,6 +12,7 @@ use crate::quote::QuoteStats;
 
 pub use models::*;
 
+#[derive(Clone)]
 pub struct Store {
     pub pool: PgPool,
 }
@@ -199,6 +200,8 @@ impl Store {
 
         Ok(result)
     }
+
+    
 }
 
 #[derive(Debug)]

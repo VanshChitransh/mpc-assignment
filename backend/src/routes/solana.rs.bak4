@@ -279,19 +279,19 @@ pub async fn execute_swap(
     let store = Store::new(data.db.clone());
     let quote = match store.get_valid_quote(&quote_id, &user_id).await {
         Ok(quote) => quote,
-        Err(QuoteError::QuoteNotFound) => {
+        Err(store::QuoteError::QuoteNotFound) => {
             return Ok(HttpResponse::NotFound().json(ErrorResponse {
                 success: false,
                 error: "Quote not found".to_string(),
             }));
         }
-        Err(QuoteError::QuoteExpired) => {
+        Err(store::QuoteError::QuoteExpired) => {
             return Ok(HttpResponse::BadRequest().json(ErrorResponse {
                 success: false,
                 error: "Quote has expired".to_string(),
             }));
         }
-        Err(QuoteError::QuoteAlreadyUsed) => {
+        Err(store::QuoteError::QuoteAlreadyUsed) => {
             return Ok(HttpResponse::BadRequest().json(ErrorResponse {
                 success: false,
                 error: "Quote has already been used".to_string(),

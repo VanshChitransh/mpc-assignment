@@ -107,8 +107,8 @@ impl Store {
 
         if new_balance < 0 {
             return Err(BalanceError::InsufficientBalance {
-                required: amount_delta.abs(),
-                available: current_balance,
+                required: amount_delta.abs() as u64,
+                available: current_balance as u64,
             });
         }
 

@@ -62,6 +62,7 @@ pub struct Quote {
     pub output_mint: String,
     pub in_amount: i64,
     pub out_amount: i64,
+    pub price_impact_pct: Option<rust_decimal::Decimal>,
     pub quote_data: serde_json::Value,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
@@ -74,13 +75,58 @@ pub struct Quote {
 pub struct Keyshare {
     pub user_id: Uuid,
     pub public_key: String,
-    pub private_key: String, 
+    pub private_key: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum QuoteError {
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+    #[error("Quote not found")]
+    QuoteNotFound,
+    #[error("Quote expired")]
+    QuoteExpired,
+    #[error("Quote already used")]
+    QuoteAlreadyUsed,
 }
 
 
 
-#[derive(Debug, Deserialize)]
+
+#[derive(Debug, thiserror::Error)]
+pub enum UserError {
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+    #[error("User not found")]
+    UserNotFound,
+    #[error("User already exists")]
+    UserAlreadyExists,
+    #[error("User exists: {0}")]
+    UserExists(String),
+    #[error("Password hash failed: {0}")]
+    PasswordHashFailed(String),
+    #[error("Invalid credentials")]
+    InvalidCredentials,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BalanceError {
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+    #[error("Balance not found")]
+    BalanceNotFound,
+    #[error("Insufficient balance")]
+    InsufficientBalance { required: u64, available: u64 },
+    #[error("Asset not found: {0}")]
+    AssetNotFound(Uuid),
+    #[error("Asset not found by mint: {0}")]
+    AssetNotFoundByMint(String),
+    #[error("Asset not found by symbol: {0}")]
+    AssetNotFoundBySymbol(String),
+}#[derive(Debug, Deserialize)]
 pub struct QuoteRequest {
     #[serde(rename = "inputMint")]
     pub input_mint: String,
@@ -96,8 +142,8 @@ pub struct QuoteRequest {
 pub struct QuoteResponse {
     #[serde(rename = "outAmount")]
     pub out_amount: i64,
+    pub price_impact_pct: Option<rust_decimal::Decimal>,
     pub id: String,
-    pub price_impact_pct: f64,
     pub slippage_bps: i32,
 }
 
@@ -214,58 +260,6 @@ pub struct MpcSignResponse {
 }
 
 
-#[derive(Debug, thiserror::Error)]
-pub enum UserError {
-    #[error("User with email '{0}' already exists")]
-    UserExists(String),
-    #[error("User not found")]
-    UserNotFound,
-    #[error("Invalid credentials provided")]
-    InvalidCredentials,
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-    #[error("Database error: {0}")]
-    DatabaseError(String),
-    #[error("MPC key generation failed: {0}")]
-    MpcKeyGenFailed(String),
-    #[error("Password hashing failed: {0}")]
-    PasswordHashFailed(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum BalanceError {
-    #[error("Balance not found for user {user_id} and asset {asset_id}")]
-    BalanceNotFound { user_id: Uuid, asset_id: Uuid },
-    #[error("Insufficient balance: required {required}, available {available}")]
-    InsufficientBalance { required: i64, available: i64 },
-    #[error("Asset not found with ID: {0}")]
-    AssetNotFound(Uuid),
-    #[error("Asset not found with mint address: {0}")]
-    AssetNotFoundByMint(String),
-    #[error("Asset not found with symbol: {0}")]
-    AssetNotFoundBySymbol(String),
-    #[error("Database error: {0}")]
-    DatabaseError(String),
-    #[error("Invalid amount: {0}")]
-    InvalidAmount(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum QuoteError {
-    #[error("Quote not found with ID: {0}")]
-    QuoteNotFound(Uuid),
-    #[error("Quote expired at {expired_at}")]
-    QuoteExpired { expired_at: DateTime<Utc> },
-    #[error("Quote already used")]
-    QuoteAlreadyUsed,
-    #[error("Quote belongs to different user")]
-    QuoteUnauthorized,
-    #[error("Database error: {0}")]
-    DatabaseError(String),
-    #[error("Invalid quote data: {0}")]
-    InvalidQuoteData(String),
-}
-
 
 impl User {
     pub fn new(email: String, password_hash: String) -> Self {
@@ -327,7 +321,7 @@ impl Quote {
             expires_at: now + chrono::Duration::seconds(expires_in_seconds),
             created_at: now,
             used: false,
-            updated_at: now,
+            price_impact_pct: None,            updated_at: now,
         }
     }
 

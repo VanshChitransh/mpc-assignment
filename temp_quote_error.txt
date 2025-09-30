@@ -1,0 +1,11 @@
+#[derive(Debug, Error)]
+pub enum QuoteError {
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+    #[error("Quote not found")]
+    QuoteNotFound,
+    #[error("Quote expired")]
+    QuoteExpired,
+    #[error("Quote already used")]
+    QuoteAlreadyUsed,
+}
