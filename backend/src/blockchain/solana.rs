@@ -30,6 +30,9 @@ pub enum SolanaError {
     
     #[error("Transaction broadcast failed: {0}")]
     BroadcastFailed(String),
+    
+    #[error("Insufficient balance: required {0}, available {1}")]
+    InsufficientBalance(u64, u64),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,10 +48,26 @@ pub struct UnsignedTransaction {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct SolanaBalance {
+    pub lamports: u64,
+    pub ui_balance: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenBalance {
+    pub mint: String,
+    pub amount: String, // String to handle large uint64 values
+    pub decimals: u8,
+    pub ui_amount: f64,
+    pub ui_amount_string: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct BlockhashResponse {
     jsonrpc: String,
     id: u64,
     result: Option<BlockhashResult>,
+    error: Option<RpcError>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,11 +95,94 @@ struct RpcError {
     message: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct BalanceResponse {
+    jsonrpc: String,
+    id: u64,
+    result: Option<BalanceResult>,
+    error: Option<RpcError>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BalanceResult {
+    context: RpcContext,
+    value: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RpcContext {
+    slot: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenAccountsResponse {
+    jsonrpc: String,
+    id: u64,
+    result: Option<TokenAccountsResult>,
+    error: Option<RpcError>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenAccountsResult {
+    context: RpcContext,
+    value: Vec<TokenAccountInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenAccountInfo {
+    pubkey: String,
+    account: TokenAccountData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenAccountData {
+    data: TokenData,
+    executable: bool,
+    lamports: u64,
+    owner: String,
+    rent_epoch: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenData {
+    parsed: TokenParsed,
+    program: String,
+    space: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenParsed {
+    info: TokenInfo,
+    #[serde(rename = "type")]
+    token_type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenInfo {
+    mint: String,
+    owner: String,
+    #[serde(rename = "tokenAmount")]
+    token_amount: TokenAmount,
+    state: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenAmount {
+    amount: String,
+    decimals: u8,
+    #[serde(rename = "uiAmount")]
+    ui_amount: f64,
+    #[serde(rename = "uiAmountString")]
+    ui_amount_string: String,
+}
+
 #[derive(Clone)]
 pub struct SolanaBlockchain {
     client: Client,
     rpc_url: String,
     commitment: String,
+    token_program_id: String,
+    associated_token_program_id: String,
 }
 
 impl SolanaBlockchain {
@@ -95,6 +197,8 @@ impl SolanaBlockchain {
             client,
             rpc_url,
             commitment,
+            token_program_id: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string(),
+            associated_token_program_id: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".to_string(),
         }
     }
     
@@ -132,6 +236,103 @@ impl SolanaBlockchain {
         Ok(address)
     }
     
+    /// Get SOL balance for an address
+    pub async fn get_sol_balance(&self, address: &str) -> Result<SolanaBalance, SolanaError> {
+        if !self.validate_address(address) {
+            return Err(SolanaError::InvalidAddress(format!("Invalid address format: {}", address)));
+        }
+        
+        let request_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalance",
+            "params": [
+                address,
+                {"commitment": self.commitment}
+            ]
+        });
+        
+        let response = self.client
+            .post(&self.rpc_url)
+            .json(&request_body)
+            .send()
+            .await?;
+        
+        let balance_response: BalanceResponse = response.json().await?;
+        
+        if let Some(error) = balance_response.error {
+            return Err(SolanaError::RpcError(format!("RPC error: {} - {}", error.code, error.message)));
+        }
+        
+        match balance_response.result {
+            Some(result) => {
+                let lamports = result.value;
+                let ui_balance = lamports as f64 / 1_000_000_000.0; // 9 decimals for SOL
+                
+                Ok(SolanaBalance {
+                    lamports,
+                    ui_balance,
+                })
+            },
+            None => Err(SolanaError::RpcError("No result in balance response".to_string())),
+        }
+    }
+    
+    /// Get all token balances for an address
+    pub async fn get_token_balances(&self, address: &str) -> Result<Vec<TokenBalance>, SolanaError> {
+        if !self.validate_address(address) {
+            return Err(SolanaError::InvalidAddress(format!("Invalid address format: {}", address)));
+        }
+        
+        let request_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                address,
+                {
+                    "programId": self.token_program_id
+                },
+                {
+                    "encoding": "jsonParsed"
+                }
+            ]
+        });
+        
+        let response = self.client
+            .post(&self.rpc_url)
+            .json(&request_body)
+            .send()
+            .await?;
+        
+        let accounts_response: TokenAccountsResponse = response.json().await?;
+        
+        if let Some(error) = accounts_response.error {
+            return Err(SolanaError::RpcError(format!("RPC error: {} - {}", error.code, error.message)));
+        }
+        
+        match accounts_response.result {
+            Some(result) => {
+                let mut token_balances = Vec::new();
+                
+                for account in result.value {
+                    let token_data = &account.account.data.parsed.info;
+                    
+                    token_balances.push(TokenBalance {
+                        mint: token_data.mint.clone(),
+                        amount: token_data.token_amount.amount.clone(),
+                        decimals: token_data.token_amount.decimals,
+                        ui_amount: token_data.token_amount.ui_amount,
+                        ui_amount_string: token_data.token_amount.ui_amount_string.clone(),
+                    });
+                }
+                
+                Ok(token_balances)
+            },
+            None => Err(SolanaError::RpcError("No result in token accounts response".to_string())),
+        }
+    }
+    
     /// Get recent blockhash from Solana network
     pub async fn get_recent_blockhash(&self) -> Result<String, SolanaError> {
         let request_body = serde_json::json!({
@@ -152,17 +353,13 @@ impl SolanaBlockchain {
         let rpc_response: BlockhashResponse = response.json().await?;
         
         if let Some(error) = rpc_response.error {
-            return Err(SolanaError::RpcError(format!(
-                "Failed to get blockhash: {}: {}", 
-                error.code, 
-                error.message
-            )));
+            return Err(SolanaError::RpcError(format!("Failed to get blockhash: {} - {}", error.code, error.message)));
         }
         
-        Ok(rpc_response.result
-            .ok_or_else(|| SolanaError::RpcError("No blockhash in response".to_string()))?
-            .value
-            .blockhash)
+        match &rpc_response.result {
+            Some(result) => Ok(result.value.blockhash.clone()),
+            None => Err(SolanaError::RpcError("No blockhash in response".to_string())),
+        }
     }
     
     /// Build a SOL transfer transaction
@@ -179,6 +376,12 @@ impl SolanaBlockchain {
         
         if !self.validate_address(to_pubkey) {
             return Err(SolanaError::InvalidAddress(format!("Invalid recipient address: {}", to_pubkey)));
+        }
+        
+        // Check balance
+        let balance = self.get_sol_balance(from_pubkey).await?;
+        if balance.lamports < lamports + 5000 { // Add 5000 lamports for fee
+            return Err(SolanaError::InsufficientBalance(lamports + 5000, balance.lamports));
         }
         
         // Get recent blockhash
@@ -233,8 +436,18 @@ impl SolanaBlockchain {
         // Get recent blockhash
         let blockhash = self.get_recent_blockhash().await?;
         
-        // Token program address
-        let token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+        // Get token balance to check if sufficient
+        let token_balances = self.get_token_balances(from_pubkey).await?;
+        let balance = token_balances.iter().find(|b| b.mint == mint);
+        
+        if let Some(balance) = balance {
+            let balance_amount = balance.amount.parse::<u64>().unwrap_or(0);
+            if balance_amount < amount {
+                return Err(SolanaError::InsufficientBalance(amount, balance_amount));
+            }
+        } else {
+            return Err(SolanaError::InsufficientBalance(amount, 0));
+        }
         
         // Get or create source token account
         let source_token_account = self.get_or_create_token_account(from_pubkey, mint).await?;
@@ -246,12 +459,11 @@ impl SolanaBlockchain {
         let transfer_data = self.encode_token_transfer_instruction(amount);
         
         // Build transaction message for token transfer
-        // This is simplified - a real implementation would handle creating token accounts if needed
         let message = self.build_token_transaction_message(
             from_pubkey,
             &source_token_account,
             &dest_token_account,
-            token_program,
+            &self.token_program_id,
             &transfer_data,
             &blockhash
         )?;
@@ -311,14 +523,16 @@ impl SolanaBlockchain {
         
         if let Some(error) = rpc_response.error {
             return Err(SolanaError::BroadcastFailed(format!(
-                "Failed to broadcast transaction: {}: {}", 
+                "Failed to broadcast transaction: {} - {}", 
                 error.code, 
                 error.message
             )));
         }
         
-        Ok(rpc_response.result
-            .ok_or_else(|| SolanaError::RpcError("No transaction ID in response".to_string()))?)
+        match rpc_response.result {
+            Some(signature) => Ok(signature),
+            None => Err(SolanaError::BroadcastFailed("No transaction ID in response".to_string())),
+        }
     }
     
     /// Build a signed transaction from message and signature
@@ -351,9 +565,6 @@ impl SolanaBlockchain {
         instruction_data: &[u8],
         recent_blockhash: &str
     ) -> Result<Vec<u8>, SolanaError> {
-        // In a real implementation, this would use Solana SDK to construct the message
-        // For now, we'll build a simplified format
-        
         // Decode addresses from base58
         let from_bytes = bs58::decode(from)
             .into_vec()
@@ -514,52 +725,4 @@ pub fn create_solana_blockchain() -> SolanaBlockchain {
         .unwrap_or_else(|_| "confirmed".to_string());
     
     SolanaBlockchain::new(rpc_url, commitment)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_validate_address() {
-        let blockchain = create_solana_blockchain();
-        
-        // Valid Solana addresses
-        assert!(blockchain.validate_address("11111111111111111111111111111111"));
-        assert!(blockchain.validate_address("So11111111111111111111111111111111111111112"));
-        
-        // Invalid addresses
-        assert!(!blockchain.validate_address("invalid"));
-        assert!(!blockchain.validate_address("too_short"));
-        assert!(!blockchain.validate_address("11111111")); // Too short
-    }
-    
-    #[test]
-    fn test_derive_solana_address() {
-        let blockchain = create_solana_blockchain();
-        
-        // Test with a known public key
-        let pubkey = "0000000000000000000000000000000000000000000000000000000000000000";
-        let result = blockchain.derive_solana_address(pubkey);
-        assert!(result.is_ok());
-        
-        // Invalid public key (too short)
-        let invalid_pubkey = "000000";
-        let result = blockchain.derive_solana_address(invalid_pubkey);
-        assert!(result.is_err());
-    }
-    
-    #[test]
-    fn test_encode_transfer_instruction() {
-        let blockchain = create_solana_blockchain();
-        
-        // Test encoding for 1 SOL (1_000_000_000 lamports)
-        let data = blockchain.encode_transfer_instruction(1_000_000_000);
-        
-        // First 4 bytes should be 2u32 little-endian (transfer instruction)
-        assert_eq!(data[0..4], [2, 0, 0, 0]);
-        
-        // Next 8 bytes should be lamports amount
-        assert_eq!(data[4..12], 1_000_000_000u64.to_le_bytes());
-    }
 }

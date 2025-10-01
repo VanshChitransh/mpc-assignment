@@ -35,8 +35,10 @@ rust_decimal = { version = "1.32", features = ["serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
 
+
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
+tracing = "0.1.41"
 
 [dev-dependencies]
 # Testing

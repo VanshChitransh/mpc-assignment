@@ -3,51 +3,39 @@ name = "backend"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+actix-web = "4.4"
+actix-cors = "0.6.4"
+tokio = { version = "1.32", features = ["full"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "migrate"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dotenv = "0.15"
+log = "0.4"
+thiserror = "1.0"
+jsonwebtoken = "9.0"
+bcrypt = "0.15"
+uuid = { version = "1.4", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-actix-web = "0.7"
+reqwest = { version = "0.11", features = ["json"] }
+futures = "0.3"
+bs58 = "0.4" # For Solana address encoding
+hex = "0.4" # For hex encoding/decoding
+base64 = "0.21" # For base64 encoding/decoding
+sha2 = "0.10" # For hashing
+lazy_static = "1.4" # For static metrics
+prometheus = { version = "0.13", features = ["process"] } # For metrics
+rand = "0.8" # For random number generation
+async-trait = "0.1" # For async traits
+
+
+# Internal crates
+store = { path = "../store" }
+futures-util = "0.3.31"
+
 [[bin]]
 name = "backend"
 path = "src/main.rs"
-
-[dependencies]
-# Web framework
-actix-web = "4.11.0"
-
-# Async runtime
-tokio = { version = "1.47.1", features = ["full"] }
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Database
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "migrate"] }
-
-# Authentication
-jsonwebtoken = "9"
-bcrypt = "0.15"
-
-# Date/Time
-chrono = { version = "0.4", features = ["serde"] }
-
-# Logging
-tracing = "0.1"
-env_logger = "0.11"
-
-# Environment
-dotenv = "0.15"
-
-# UUID
-uuid = { version = "1.0", features = ["v4", "serde"] }
-
-# HTTP client (for MPC communication)
-reqwest = { version = "0.11", features = ["json"] }
-
-# NEW: Missing dependencies for Step 3.3
-futures-util = "0.3"
-futures = "0.3"
-
-# NEW: Missing dependencies for MPC service
-thiserror = "1.0"
-rand = "0.8"
-
-[dev-dependencies]
-actix-http-test = "3"

@@ -1,24 +1,29 @@
-// store/src/quote.rs - Quote management module
-
 use sqlx::PgPool;
 use uuid::Uuid;
-use chrono::{DateTime, Duration, Utc};
-use serde_json::Value;
 use thiserror::Error;
+use serde_json::Value;
+use chrono::{DateTime, Utc};
+use tracing::{info, error};
 
 #[derive(Debug, Error)]
 pub enum QuoteError {
     #[error("Database error: {0}")]
-    DatabaseError(String),
-    #[error("Quote not found")]
-    QuoteNotFound,
+    DatabaseError(#[from] sqlx::Error),
+    
+    #[error("Quote not found: {0}")]
+    QuoteNotFound(Uuid),
+    
     #[error("Quote expired")]
     QuoteExpired,
+    
     #[error("Quote already used")]
     QuoteAlreadyUsed,
+    
+    #[error("Unauthorized: user {0} does not own quote {1}")]
+    Unauthorized(Uuid, Uuid),
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct Quote {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -26,17 +31,24 @@ pub struct Quote {
     pub output_mint: String,
     pub in_amount: i64,
     pub out_amount: i64,
-    
     pub quote_data: Value,
-    pub used: bool,
     pub expires_at: DateTime<Utc>,
+    pub used: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-impl super::Store {
-    /// Store a new quote
-    pub async fn store_quote(
+pub struct QuoteStore<'a> {
+    pool: &'a PgPool,
+}
+
+impl<'a> QuoteStore<'a> {
+    pub fn new(pool: &'a PgPool) -> Self {
+        Self { pool }
+    }
+    
+    /// Create a new quote
+    pub async fn create_quote(
         &self,
         user_id: &Uuid,
         input_mint: &str,
@@ -44,141 +56,140 @@ impl super::Store {
         in_amount: i64,
         out_amount: i64,
         quote_data: Value,
-        expiry_seconds: i64,
+        expires_at: DateTime<Utc>,
     ) -> Result<Quote, QuoteError> {
-        let expires_at = Utc::now() + Duration::seconds(expiry_seconds);
-        
         let quote = sqlx::query_as!(
             Quote,
             r#"
-            INSERT INTO quotes 
-            (user_id, input_mint, output_mint, in_amount, out_amount, 
-             quote_data, expires_at, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-            RETURNING id, user_id, input_mint, output_mint, in_amount, 
-                     out_amount, quote_data, used, 
-                     expires_at, created_at, updated_at
+            INSERT INTO quotes (
+                user_id, input_mint, output_mint, 
+                in_amount, out_amount, quote_data, 
+                expires_at, used
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, false)
+            RETURNING 
+                id, user_id, input_mint, output_mint, 
+                in_amount, out_amount, quote_data as "quote_data!: Value", 
+                expires_at, used, created_at, updated_at
             "#,
             user_id,
             input_mint,
             output_mint,
             in_amount,
             out_amount,
-            quote_data,
-            expires_at
+            quote_data as _,
+            expires_at,
         )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| QuoteError::DatabaseError(e.to_string()))?;
-
+        .fetch_one(self.pool)
+        .await?;
+        
         Ok(quote)
     }
-
-    /// Get a valid quote by ID
-    pub async fn get_valid_quote(&self, quote_id: &Uuid, user_id: &Uuid) -> Result<Quote, QuoteError> {
+    
+    /// Get a quote by ID
+    pub async fn get_quote(&self, id: &Uuid) -> Result<Quote, QuoteError> {
         let quote = sqlx::query_as!(
             Quote,
             r#"
-            SELECT id, user_id, input_mint, output_mint, in_amount, 
-                   out_amount, quote_data, used, 
-                   expires_at, created_at, updated_at
+            SELECT 
+                id, user_id, input_mint, output_mint, 
+                in_amount, out_amount, quote_data as "quote_data!: Value", 
+                expires_at, used, created_at, updated_at
+            FROM quotes
+            WHERE id = $1
+            "#,
+            id
+        )
+        .fetch_optional(self.pool)
+        .await?;
+        
+        match quote {
+            Some(quote) => Ok(quote),
+            None => Err(QuoteError::QuoteNotFound(*id)),
+        }
+    }
+    
+    /// Get a valid quote (not expired, not used) for a specific user
+    pub async fn get_valid_quote(&self, id: &Uuid, user_id: &Uuid) -> Result<Quote, QuoteError> {
+        let now = Utc::now();
+        
+        let quote = sqlx::query_as!(
+            Quote,
+            r#"
+            SELECT 
+                id, user_id, input_mint, output_mint, 
+                in_amount, out_amount, quote_data as "quote_data!: Value", 
+                expires_at, used, created_at, updated_at
             FROM quotes
             WHERE id = $1 AND user_id = $2
             "#,
-            quote_id,
+            id,
             user_id
         )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| QuoteError::DatabaseError(e.to_string()))?
-        .ok_or(QuoteError::QuoteNotFound)?;
-
+        .fetch_optional(self.pool)
+        .await?;
+        
+        let quote = match quote {
+            Some(quote) => quote,
+            None => return Err(QuoteError::QuoteNotFound(*id)),
+        };
+        
+        // Check if user is authorized
+        if quote.user_id != *user_id {
+            return Err(QuoteError::Unauthorized(*user_id, *id));
+        }
+        
         // Check if quote is expired
-        if Utc::now() > quote.expires_at {
+        if quote.expires_at < now {
             return Err(QuoteError::QuoteExpired);
         }
-
+        
         // Check if quote is already used
         if quote.used {
             return Err(QuoteError::QuoteAlreadyUsed);
         }
-
+        
         Ok(quote)
     }
-
+    
     /// Mark a quote as used
-    pub async fn mark_quote_used(&self, quote_id: &Uuid) -> Result<(), QuoteError> {
-        let result = sqlx::query!(
-            "UPDATE quotes SET used = true, updated_at = NOW() WHERE id = $1",
-            quote_id
+    pub async fn mark_quote_used(&self, id: &Uuid) -> Result<Quote, QuoteError> {
+        let quote = sqlx::query_as!(
+            Quote,
+            r#"
+            UPDATE quotes
+            SET used = true, updated_at = NOW()
+            WHERE id = $1
+            RETURNING 
+                id, user_id, input_mint, output_mint, 
+                in_amount, out_amount, quote_data as "quote_data!: Value", 
+                expires_at, used, created_at, updated_at
+            "#,
+            id
         )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| QuoteError::DatabaseError(e.to_string()))?;
-
-        if result.rows_affected() == 0 {
-            return Err(QuoteError::QuoteNotFound);
+        .fetch_optional(self.pool)
+        .await?;
+        
+        match quote {
+            Some(quote) => Ok(quote),
+            None => Err(QuoteError::QuoteNotFound(*id)),
         }
-
-        Ok(())
     }
-
+    
     /// Clean up expired quotes
     pub async fn cleanup_expired_quotes(&self) -> Result<u64, QuoteError> {
+        let now = Utc::now();
+        
         let result = sqlx::query!(
-            "DELETE FROM quotes WHERE expires_at < NOW() AND used = false"
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| QuoteError::DatabaseError(e.to_string()))?;
-
-        Ok(result.rows_affected())
-    }
-}
-
-#[derive(Debug)]
-pub struct QuoteStats {
-    pub total_quotes: i64,
-    pub used_quotes: i64,
-    pub expired_quotes: i64,
-    pub active_quotes: i64,
-}
-
-impl super::Store {
-    /// Get quote statistics
-    pub async fn get_quote_stats(&self) -> Result<QuoteStats, QuoteError> {
-        let stats = sqlx::query!(
             r#"
-            SELECT 
-                COUNT(*) as total_quotes,
-                COUNT(*) FILTER (WHERE used = true) as used_quotes,
-                COUNT(*) FILTER (WHERE expires_at < NOW()) as expired_quotes,
-                COUNT(*) FILTER (WHERE used = false AND expires_at > NOW()) as active_quotes
-            FROM quotes
-            "#
+            DELETE FROM quotes
+            WHERE expires_at < $1
+            "#,
+            now
         )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| QuoteError::DatabaseError(e.to_string()))?;
-
-        Ok(QuoteStats {
-            total_quotes: stats.total_quotes.unwrap_or(0),
-            used_quotes: stats.used_quotes.unwrap_or(0),
-            expired_quotes: stats.expired_quotes.unwrap_or(0),
-            active_quotes: stats.active_quotes.unwrap_or(0),
-        })
-    }
-
-    /// Clean up old used quotes
-    pub async fn cleanup_old_used_quotes(&self, days_old: i32) -> Result<u64, QuoteError> {
-        let result = sqlx::query!(
-            "DELETE FROM quotes WHERE used = true AND created_at < NOW() - INTERVAL '1 day' * $1",
-            days_old as f64
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| QuoteError::DatabaseError(e.to_string()))?;
-
+        .execute(self.pool)
+        .await?;
+        
         Ok(result.rows_affected())
     }
 }

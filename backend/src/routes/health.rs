@@ -1,25 +1,31 @@
-use actix_web::{get, HttpResponse, Result, web};
-use serde_json::json;
-use sqlx::PgPool;
+use actix_web::{web, HttpResponse, Responder};
+use serde::Serialize;
+use crate::AppState;
 
-#[get("/health")]
-pub async fn health_check(pool: web::Data<PgPool>) -> Result<HttpResponse> {
-    // Test database connection
-    let db_status = match sqlx::query("SELECT 1 as health").fetch_one(pool.as_ref()).await {
+#[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+    database: String,
+    service: String,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn health(data: web::Data<AppState>) -> impl Responder {
+    // Check database connection
+    let db_status = match sqlx::query("SELECT 1").execute(&data.db).await {
         Ok(_) => "healthy",
         Err(_) => "unhealthy",
     };
 
-    let response = json!({
-        "status": if db_status == "healthy" { "ok" } else { "error" },
-        "database": db_status,
-        "timestamp": chrono::Utc::now(),
-        "service": "mpc-solana-wallet-backend"
-    });
+    HttpResponse::Ok().json(HealthResponse {
+        status: "ok".to_string(),
+        database: db_status.to_string(),
+        service: "mpc-solana-wallet-backend".to_string(),
+        timestamp: chrono::Utc::now(),
+    })
+}
 
-    if db_status == "healthy" {
-        Ok(HttpResponse::Ok().json(response))
-    } else {
-        Ok(HttpResponse::ServiceUnavailable().json(response))
-    }
+// Add config function for route registration
+pub fn config(cfg: &mut web::ServiceConfig) {
+    cfg.route("/health", web::get().to(health));
 }

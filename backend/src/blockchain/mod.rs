@@ -1,3 +1,3 @@
 pub mod solana;
 
-pub use solana::{SolanaBlockchain, create_solana_blockchain};
+pub use solana::create_solana_blockchain;
