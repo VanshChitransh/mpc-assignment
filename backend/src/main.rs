@@ -1,103 +1,122 @@
+// backend/src/main.rs
 use actix_web::{web, App, HttpServer, middleware::Logger};
-use actix_web::middleware::NormalizePath;
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
-use tracing_actix_web::TracingLogger;
-use dotenv::dotenv;
-use prometheus::Registry;
+use sqlx::postgres::PgPoolOptions;
+use std::env;
 use std::sync::Arc;
-use store::Store;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod blockchain;
+mod error;
 mod middleware;
 mod routes;
 mod services;
-mod blockchain;
-mod error;
+mod store;
 
+use blockchain::solana;
 use middleware::auth::JwtAuth;
-use middleware::AuthMiddleware;
-use routes::{user_config, solana_config, health_config};
-use services::{create_mpc_client, create_jupiter_client};
-use blockchain::create_solana_blockchain;
+use routes::{health, solana as solana_routes, user};
+use services::mpc::{MpcClient, create_mpc_client};
+use services::jupiter::{JupiterClient, create_jupiter_client};
+use store::Store;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Pool<Postgres>,
-    pub store: Store,
-    pub jwt_auth: JwtAuth,
-    pub mpc_client: Arc<services::MpcClient>,
-    pub solana_blockchain: blockchain::solana::SolanaBlockchain,
-    pub jupiter_client: services::JupiterClient,
+    store: Store,
+    mpc_client: Arc<MpcClient>,
+    jupiter_client: Arc<JupiterClient>,
+    solana_client: Arc<solana::SolanaClient>,
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenv().ok();
+    // Initialize tracing
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+        ))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    // Load environment variables
+    dotenv::dotenv().ok();
     
-    // Initialize logging
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info,actix_web=info,sqlx=warn");
-    }
-    tracing_subscriber::fmt::init();
+    let database_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/solana_wallet".into());
     
-    // Initialize Prometheus registry
-    let registry = Registry::new();
-    
-    // Get configuration from environment
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/solana_wallet".to_string());
-    
-    let bind_address = std::env::var("BIND_ADDRESS")
-        .unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    
-    // Create database connection pool
+    let jwt_secret = env::var("JWT_SECRET")
+        .unwrap_or_else(|_| "your_jwt_secret".into());
+
+    let mpc_node_urls = vec![
+        env::var("MPC_NODE_1_URL").unwrap_or_else(|_| "http://localhost:8001".into()),
+        env::var("MPC_NODE_2_URL").unwrap_or_else(|_| "http://localhost:8002".into()),
+        env::var("MPC_NODE_3_URL").unwrap_or_else(|_| "http://localhost:8003".into()),
+    ];
+
+    let solana_rpc_url = env::var("SOLANA_RPC_URL")
+        .unwrap_or_else(|_| "https://api.devnet.solana.com".into());
+
+    let jupiter_api_url = env::var("JUPITER_API_URL")
+        .unwrap_or_else(|_| "https://quote-api.jup.ag/v6".into());
+
+    // Database connection pool
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(&database_url)
         .await
-        .expect("Failed to connect to PostgreSQL");
-    
+        .expect("Failed to connect to database");
+
+    // Initialize store
     let store = Store::new(pool.clone());
     
-    // Initialize JWT authentication
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "your-256-bit-secret".to_string());
-    
-    let jwt_auth = JwtAuth::new(jwt_secret);
-    
     // Initialize MPC client
-    let mpc_client = Arc::new(create_mpc_client());
-    
-    // Initialize Solana blockchain
-    let solana_blockchain = create_solana_blockchain();
+    let mpc_client = Arc::new(create_mpc_client(mpc_node_urls, true)); // Mock mode for testing
     
     // Initialize Jupiter client
-    let jupiter_client = create_jupiter_client();
+    let jupiter_client = Arc::new(create_jupiter_client(jupiter_api_url, true)); // Mock mode for testing
     
-    // Create app state
-    let app_state = web::Data::new(AppState {
-        db: pool.clone(),
+    // Initialize Solana client
+    let solana_client = Arc::new(solana::create_solana_client(solana_rpc_url, true)); // Mock mode for testing
+    
+    // Initialize JWT auth middleware
+    let jwt_auth = JwtAuth::new(jwt_secret);
+
+    // Create application state
+    let app_state = AppState {
         store,
-        jwt_auth: jwt_auth.clone(),
         mpc_client,
-        solana_blockchain,
         jupiter_client,
-    });
-    
-    println!("🚀 Starting server at http://{}", bind_address);
-    
+        solana_client,
+    };
+
     // Start HTTP server
+    println!("🚀 Starting server at http://127.0.0.1:8080");
+    
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
-            .wrap(TracingLogger::default())
-            .wrap(NormalizePath::trim())
-            .wrap(AuthMiddleware::new(jwt_auth.clone()))
-            .app_data(app_state.clone())
-            .configure(health_config)
-            .configure(user_config)
-            .configure(solana_config)
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(jwt_auth.clone()))
+            .app_data(web::Data::new(app_state.mpc_client.clone()))
+            .app_data(web::Data::new(app_state.jupiter_client.clone()))
+            .app_data(web::Data::new(app_state.solana_client.clone()))
+            .app_data(web::Data::new(app_state.store.clone()))
+            .app_data(web::Data::new(app_state.clone()))
+            .service(health::health_check)
+            .service(
+                web::scope("/api/user")
+                    .service(user::sign_up)
+                    .service(user::sign_in)
+                    .service(user::get_profile)
+            )
+            .service(
+                web::scope("/api/solana")
+                    .route("/balance", web::get().to(solana_routes::get_balance))
+                    .route("/quote", web::post().to(solana_routes::get_quote))
+                    .route("/swap", web::post().to(solana_routes::swap))
+                    .route("/send", web::post().to(solana_routes::send))
+            )
     })
-    .bind(bind_address)?
+    .bind("127.0.0.1:8080")?
     .run()
     .await
 }

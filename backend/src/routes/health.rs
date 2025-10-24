@@ -1,31 +1,31 @@
-use actix_web::{web, HttpResponse, Responder};
+use actix_web::{web, HttpResponse, Result};
 use serde::Serialize;
-use crate::AppState;
+use chrono::Utc;
+use crate::main::AppState;
 
 #[derive(Serialize)]
 struct HealthResponse {
     status: String,
-    database: String,
     service: String,
-    timestamp: chrono::DateTime<chrono::Utc>,
+    database: String,
+    timestamp: String,
 }
 
-pub async fn health(data: web::Data<AppState>) -> impl Responder {
-    // Check database connection
-    let db_status = match sqlx::query("SELECT 1").execute(&data.db).await {
+#[actix_web::get("/health")]
+pub async fn health_check(data: web::Data<AppState>) -> Result<HttpResponse> {
+    // CRITICAL FIX: Use data.store.pool instead of data.db
+    let db_status = match sqlx::query("SELECT 1")
+        .execute(&data.store.pool)
+        .await
+    {
         Ok(_) => "healthy",
         Err(_) => "unhealthy",
     };
 
-    HttpResponse::Ok().json(HealthResponse {
+    Ok(HttpResponse::Ok().json(HealthResponse {
         status: "ok".to_string(),
-        database: db_status.to_string(),
         service: "mpc-solana-wallet-backend".to_string(),
-        timestamp: chrono::Utc::now(),
-    })
-}
-
-// Add config function for route registration
-pub fn config(cfg: &mut web::ServiceConfig) {
-    cfg.route("/health", web::get().to(health));
+        database: db_status.to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+    }))
 }

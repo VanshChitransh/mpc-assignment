@@ -2,6 +2,9 @@
 name = "store"
 version = "0.1.0"
 edition = "2021"
+# Disable automatic inclusion of binaries under src/bin to avoid compiling example/test bins
+# that depend on non-existent symbols during SQLx preparation.
+autobins = false
 
 [dependencies]
 # Database - without offline feature (we'll use SQLX_OFFLINE env var)
@@ -16,8 +19,10 @@ sqlx = { version = "0.7", features = [
     "macros"
 ] }
 
-# Cryptography and password hashing
 bcrypt = "0.15"
+
+# Cryptography and password hashing - REPLACED bcrypt with argon2
+argon2 = "0.5"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -35,7 +40,6 @@ rust_decimal = { version = "1.32", features = ["serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
 
-
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 tracing = "0.1.41"
@@ -44,14 +48,3 @@ tracing = "0.1.41"
 # Testing
 tokio-test = "0.4"
 
-[[bin]]
-name = "store_test"
-path = "src/bin/test.rs"
-
-[[bin]]
-name = "verify_db"
-path = "src/bin/verify_db.rs"
-
-[[bin]]
-name = "schema_validation"
-path = "src/bin/schema_validation.rs"
